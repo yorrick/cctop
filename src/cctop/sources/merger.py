@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cctop.models import Event, Session
-from cctop.sources.index import find_index_entry
+from cctop.sources.index import IndexEntry, _read_transcript_metadata, encode_cwd, find_index_entry
 from cctop.sources.sessions import discover_sessions
 
 # Grace period before a session transitions from "working" to "idle".
@@ -29,6 +29,8 @@ class SessionManager:
         # When Claude resumes a session, the PID file gets a new session ID,
         # but hooks still report the original transcript session ID.
         self._hook_sid_to_pid_sid: dict[str, str] = {}
+        # Reverse mapping: PID-file session ID -> hook/transcript session ID
+        self._pid_sid_to_hook_sid: dict[str, str] = {}
         # Maps cwd -> PID-file session ID for reverse lookup
         self._cwd_to_pid_sid: dict[str, str] = {}
         # Sessions that received a Stop event (Claude finished its turn).
@@ -85,7 +87,25 @@ class SessionManager:
                 self._sessions.pop(raw.session_id, None)
                 continue
 
+            # Try index lookup with PID-file session ID first, then fall back
+            # to the hook/transcript session ID (for resumed/continued sessions
+            # where the PID file has a different ID than the transcript).
             entry = find_index_entry(self._projects_dir, raw.cwd, raw.session_id)
+            if not entry:
+                # Try 1: use known hook-to-PID mapping (learned from events)
+                hook_sid = self._pid_sid_to_hook_sid.get(raw.session_id)
+                if hook_sid:
+                    entry = find_index_entry(self._projects_dir, raw.cwd, hook_sid)
+            if not entry:
+                # Try 2: find the active transcript by looking for the most recently
+                # modified .jsonl in the project dir that was written to after this
+                # session started. This handles pre-hook sessions safely.
+                entry = _find_active_transcript_entry(
+                    self._projects_dir,
+                    raw.cwd,
+                    raw.session_id,
+                    raw.started_at,
+                )
             if entry:
                 session.summary = entry.summary
                 session.first_prompt = entry.first_prompt
@@ -148,6 +168,7 @@ class SessionManager:
             pid_sid = self._cwd_to_pid_sid.get(event.cwd)
             if pid_sid:
                 self._hook_sid_to_pid_sid[event.sid] = pid_sid
+                self._pid_sid_to_hook_sid[pid_sid] = event.sid
                 # Also use the hook sid (transcript sid) for index lookups
                 session = self._sessions.get(pid_sid)
                 if session and not session.summary:
@@ -195,6 +216,49 @@ class SessionManager:
                 case "session_start":
                     session.last_activity = now_ts
                     self._stopped_sessions.discard(session.session_id)
+
+
+def _find_active_transcript_entry(
+    projects_dir: Path,
+    cwd: Path,
+    session_id: str,
+    started_at: datetime,
+) -> IndexEntry | None:
+    """Find the active transcript for a session by looking at recently modified files.
+
+    When Claude resumes a session, the PID file gets a new session ID but the transcript
+    stays under the original ID. We find it by looking for .jsonl files in the project
+    directory that were modified after this session started.
+
+    Safety: only returns a match if the most recent transcript was modified within
+    5 minutes of the session start or later.
+    """
+    encoded = encode_cwd(cwd)
+    project_dir = projects_dir / encoded
+
+    if not project_dir.is_dir():
+        return None
+
+    # Find transcripts modified after this session started
+    started_ts = started_at.timestamp()
+    candidates: list[Path] = []
+    for t in project_dir.glob("*.jsonl"):
+        if t.stat().st_mtime >= started_ts - 300:  # 5 minute buffer before start
+            candidates.append(t)
+
+    if not candidates:
+        return None
+
+    # Pick the most recently modified one
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    best = candidates[0]
+
+    # Don't use this transcript if its session ID matches the PID-file session ID
+    # (that case is already handled by the direct lookup)
+    if best.stem == session_id:
+        return None
+
+    return _read_transcript_metadata(session_id, best)
 
 
 _git_branch_cache: dict[str, str | None] = {}

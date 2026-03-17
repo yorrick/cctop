@@ -101,14 +101,18 @@ async def generate_summary(transcript_path: Path) -> str | None:
     )
 
     try:
-        client = anthropic.AsyncAnthropic()
+        import httpx
+
+        client = anthropic.AsyncAnthropic(
+            timeout=httpx.Timeout(10.0, connect=5.0),
+        )
         response = await asyncio.wait_for(
             client.messages.create(
                 model="claude-haiku-4-5",
                 max_tokens=50,
                 messages=[{"role": "user", "content": prompt}],
             ),
-            timeout=10.0,
+            timeout=15.0,
         )
         block = response.content[0]
         if not isinstance(block, anthropic.types.TextBlock):

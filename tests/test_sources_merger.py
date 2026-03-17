@@ -131,6 +131,59 @@ def test_merge_enriches_from_index(tmp_path: Path) -> None:
     assert mgr.sessions[0].message_count == 10
 
 
+def test_merge_enriches_name_from_transcript(tmp_path: Path) -> None:
+    """Session.name is populated from customTitle in the transcript."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    _write_session_file(sessions_dir, os.getpid(), "abc-123", "/tmp/test")
+
+    project_dir = projects_dir / "-tmp-test"
+    project_dir.mkdir()
+    transcript = project_dir / "abc-123.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "custom-title", "customTitle": "my-feature", "sessionId": "abc-123"})
+        + "\n"
+        + json.dumps({"type": "user", "message": {"content": "hello"}})
+        + "\n"
+    )
+
+    mgr = SessionManager(sessions_dir=sessions_dir, projects_dir=projects_dir)
+    mgr.refresh()
+
+    assert mgr.sessions[0].name == "my-feature"
+
+
+def test_name_survives_refresh(tmp_path: Path) -> None:
+    """Session.name set from transcript must persist across refresh() calls."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    _write_session_file(sessions_dir, os.getpid(), "abc-123", "/tmp/test")
+
+    project_dir = projects_dir / "-tmp-test"
+    project_dir.mkdir()
+    transcript = project_dir / "abc-123.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "custom-title", "customTitle": "my-feature", "sessionId": "abc-123"})
+        + "\n"
+        + json.dumps({"type": "user", "message": {"content": "hello"}})
+        + "\n"
+    )
+
+    mgr = SessionManager(sessions_dir=sessions_dir, projects_dir=projects_dir)
+    mgr.refresh()
+    assert mgr.sessions[0].name == "my-feature"
+
+    # Second refresh: name must survive even if transcript is not re-read
+    mgr.refresh()
+    assert mgr.sessions[0].name == "my-feature"
+
+
 def test_missing_pid_file_grace_period(tmp_path: Path) -> None:
     """Session stays alive for one refresh cycle if PID file temporarily disappears."""
     sessions_dir = tmp_path / "sessions"

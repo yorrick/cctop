@@ -37,6 +37,10 @@ class SessionManager:
         # Only these are candidates for idle transition after grace period.
         # Sessions with only tool_end events stay "working" (Claude is still thinking).
         self._stopped_sessions: set[str] = set()
+        # Sessions not found in PID files on the last refresh — we give them
+        # one extra refresh cycle before marking offline to avoid flicker
+        # caused by transient file-read failures.
+        self._missing_pids: dict[str, datetime] = {}
 
     @property
     def sessions(self) -> list[Session]:
@@ -67,6 +71,8 @@ class SessionManager:
                     current_tool=current_tool,
                     started_at=raw.started_at,
                     last_activity=last_activity,
+                    pr_url=existing.pr_url if existing else None,
+                    pr_title=existing.pr_title if existing else None,
                 )
             else:
                 ended_at = existing.ended_at if existing else now
@@ -81,6 +87,8 @@ class SessionManager:
                     started_at=raw.started_at,
                     last_activity=last_activity,
                     ended_at=ended_at,
+                    pr_url=existing.pr_url if existing else None,
+                    pr_title=existing.pr_title if existing else None,
                 )
 
             if session.status == "offline" and self._recent == timedelta(0):
@@ -135,14 +143,23 @@ class SessionManager:
             if sid not in seen_ids:
                 session = self._sessions[sid]
                 if session.status != "offline":
+                    # Give one extra refresh cycle before marking offline to
+                    # avoid flicker from transient PID-file read failures.
+                    if sid not in self._missing_pids:
+                        self._missing_pids[sid] = now
+                        continue
                     session.status = "offline"
                     session.ended_at = now
                     self._sessions[sid] = session
+                    self._missing_pids.pop(sid, None)
 
                 if self._recent == timedelta(0):
                     del self._sessions[sid]
                 elif session.ended_at and (now - session.ended_at) > self._recent:
                     del self._sessions[sid]
+            else:
+                # Session reappeared — clear any missing-pid tracking
+                self._missing_pids.pop(sid, None)
 
     def _resolve_session(self, event: Event) -> Session | None:
         """Resolve a hook event to a Session, handling the session ID mismatch.
@@ -209,8 +226,14 @@ class SessionManager:
                     session.last_activity = now_ts
                     self._stopped_sessions.add(session.session_id)
                 case "session_end":
-                    session.status = "offline"
-                    session.ended_at = now_ts
+                    # Only mark offline if the process is actually dead.
+                    # session_end also fires on /clear, which resets the
+                    # conversation but keeps the process alive.
+                    from cctop.sources.sessions import is_pid_alive
+
+                    if not is_pid_alive(session.pid):
+                        session.status = "offline"
+                        session.ended_at = now_ts
                     session.last_activity = now_ts
                     self._stopped_sessions.discard(session.session_id)
                 case "session_start":

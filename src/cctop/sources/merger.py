@@ -6,6 +6,11 @@ from cctop.models import Event, Session
 from cctop.sources.index import find_index_entry
 from cctop.sources.sessions import discover_sessions
 
+# Grace period before a session transitions from "working" to "idle".
+# Claude thinks between tool calls, and users type prompts — neither should
+# instantly flip to idle.
+IDLE_GRACE_SECONDS = 30
+
 
 class SessionManager:
     """Merges all data sources into a list of Session objects."""
@@ -90,6 +95,16 @@ class SessionManager:
             self._sessions[raw.session_id] = session
             self._cwd_to_pid_sid[str(raw.cwd)] = raw.session_id
 
+        # Apply idle grace period: if a session is "working" but has no current tool
+        # and last_activity was more than IDLE_GRACE_SECONDS ago, transition to idle.
+        for session in self._sessions.values():
+            if (
+                session.status == "working"
+                and session.current_tool is None
+                and (now - session.last_activity).total_seconds() > IDLE_GRACE_SECONDS
+            ):
+                session.status = "idle"
+
         for sid in list(self._sessions.keys()):
             if sid not in seen_ids:
                 session = self._sessions[sid]
@@ -156,7 +171,9 @@ class SessionManager:
                     session.current_tool = event.tool
                     session.last_activity = now_ts
                 case "tool_end" | "stop":
-                    session.status = "idle"
+                    # Don't immediately flip to idle — keep "working" status
+                    # and let the grace period in refresh() handle the transition.
+                    # Just clear the current tool and update last_activity.
                     session.current_tool = None
                     session.last_activity = now_ts
                 case "session_end":

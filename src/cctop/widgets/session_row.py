@@ -45,7 +45,10 @@ class SessionRow(Static):
         line.append(f"{s.project_name:<24}", style="bold")
 
         branch_display = s.worktree_name or s.git_branch or "—"
-        line.append(f"{branch_display:<16}", style="cyan")
+        max_branch_len = 22
+        if len(branch_display) > max_branch_len:
+            branch_display = branch_display[: max_branch_len - 1] + "…"
+        line.append(f"{branch_display:<{max_branch_len}}", style="cyan")
 
         if s.status == "working" and s.current_tool:
             line.append(f"Working: {s.current_tool:<10}", style="green")

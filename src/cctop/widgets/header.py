@@ -50,7 +50,7 @@ class Header(Static):
         line.append("\n")
         line.append("     ", style="dim")
         line.append(f"{'PROJECT':<24}", style="dim bold")
-        line.append(f"{'BRANCH':<16}", style="dim bold")
+        line.append(f"{'BRANCH':<22}", style="dim bold")
         line.append(f"{'STATUS':<20}", style="dim bold")
         line.append(f"{'DURATION':>8}", style="dim bold")
         line.append("  ", style="dim")

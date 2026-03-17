@@ -12,15 +12,19 @@ When running many Claude Code sessions simultaneously across different terminal 
 
 ## Data Architecture
 
-Three data sources are merged into a unified session model:
+Four data sources are merged into a unified session model.
+
+**Important:** Sources 1 and 2 are undocumented Claude Code implementation details, not a stable API. They may change between Claude Code versions. Source 3 is our own data. This tool is designed for single-user, local-machine use only.
 
 ### Source 1: Session Discovery — `~/.claude/sessions/{pid}.json`
 
-One file per running Claude Code process. First line contains:
+One file per running Claude Code process. Single-line JSON file containing:
 
 ```json
 {"pid": 36783, "sessionId": "b119b9f1-...", "cwd": "/Users/.../website", "startedAt": 1773690112394}
 ```
+
+Only the first line is read; any additional content is ignored.
 
 Used for:
 - Discovering which sessions exist
@@ -29,20 +33,32 @@ Used for:
 
 ### Source 2: Session Metadata — `~/.claude/projects/{encoded-cwd}/sessions-index.json`
 
-Rich metadata indexed by project directory:
+Rich metadata indexed by project directory. The `{encoded-cwd}` path segment is the absolute cwd with `/` replaced by `-` and leading `/` replaced by `-` (e.g., `/Users/foo/work` → `-Users-foo-work`).
+
+The file is a JSON object with `version`, `originalPath`, and an `entries` array. Each entry is a session:
 
 ```json
 {
-  "sessionId": "...",
-  "summary": "Created n8n-utils repo with GitHub setup",
-  "firstPrompt": "create a repo named n8n-utils",
-  "gitBranch": "main",
-  "messageCount": 14,
-  "created": "2026-01-22T17:30:31.745Z",
-  "modified": "2026-01-22T17:51:36.041Z",
-  "projectPath": "/Users/.../work"
+  "version": 1,
+  "originalPath": "/Users/.../work",
+  "entries": [
+    {
+      "sessionId": "...",
+      "fullPath": "/Users/.../.claude/projects/-Users-.../session.jsonl",
+      "summary": "Created n8n-utils repo with GitHub setup",
+      "firstPrompt": "create a repo named n8n-utils",
+      "gitBranch": "main",
+      "messageCount": 14,
+      "created": "2026-01-22T17:30:31.745Z",
+      "modified": "2026-01-22T17:51:36.041Z",
+      "projectPath": "/Users/.../work",
+      "isSidechain": false
+    }
+  ]
 }
 ```
+
+Sessions from Source 1 are joined to entries here via `sessionId`.
 
 Used for:
 - Session summary (Claude-generated, updated as conversation progresses)
@@ -83,7 +99,7 @@ class Session(BaseModel):
     pid: int
     cwd: Path
     project_name: str           # derived: repo name or dir basename
-    worktree_name: str | None   # parsed from cwd if .worktrees/ pattern
+    worktree_name: str | None   # parsed from cwd if ".worktrees/<name>" or "worktrees/<name>" in path
     git_branch: str | None      # from sessions-index
     pr_url: str | None          # from gh lookup, cached
     pr_title: str | None        # from gh lookup, cached
@@ -92,8 +108,8 @@ class Session(BaseModel):
     started_at: datetime
     last_activity: datetime     # from hooks
     ended_at: datetime | None   # when offline: from hook or PID death detection
-    idle_duration: timedelta    # computed
-    session_duration: timedelta # computed
+    idle_duration: timedelta    # computed: working=0, idle=now-last_activity, offline=frozen at death time
+    session_duration: timedelta # computed: now - started_at (or ended_at - started_at if offline)
     message_count: int          # from sessions-index
     summary: str | None         # from sessions-index
     first_prompt: str | None    # from sessions-index
@@ -111,7 +127,7 @@ Launches the Textual TUI.
 cctop [--recent DURATION]
 ```
 
-- `--recent`: Include sessions that ended within this duration. Accepts values like `30m`, `1h`, `2h`. Default: `0` (live sessions only).
+- `--recent`: Include sessions that ended within this duration. Accepts values like `30m`, `1h`, `2h`, `1d`. Parsed with a simple regex supporting `Nm`, `Nh`, `Nd` (minutes, hours, days). Default: `0` (live sessions only).
 
 ### `cctop install`
 
@@ -150,6 +166,28 @@ The script:
 3. Appends one JSONL line to `~/.cctop/data/events.jsonl`
 
 Requires `jq` as a dependency (checked during `cctop install`).
+
+**Why bash+jq instead of Python?** Hook scripts run on every single tool call. Python startup adds ~200ms overhead per invocation. The bash+jq script runs in ~5ms.
+
+### Claude Code Hook Stdin Payload
+
+Claude Code provides a JSON object on stdin with these fields (relevant ones per hook type):
+
+| Field | PreToolUse | PostToolUse | Stop | SessionStart | SessionEnd |
+|-------|:---:|:---:|:---:|:---:|:---:|
+| `hook_event_name` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `session_id` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `cwd` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `tool_name` | ✓ | ✓ | | | |
+| `tool_input` | ✓ | ✓ | | | |
+| `tool_response` | | ✓ | | | |
+| `tool_use_id` | ✓ | ✓ | | | |
+| `stop_hook_active` | | | ✓ | | |
+| `transcript_path` | ✓ | | ✓ | | |
+| `source` | | | | ✓ | |
+| `reason` | | | | | ✓ |
+
+The hook script only extracts `session_id`, `tool_name`, `cwd`, and `hook_event_name`. All other fields are ignored.
 
 ## TUI Layout
 
@@ -295,3 +333,23 @@ Runtime:
 System (checked during `cctop install`):
 - `jq` (for hook script)
 - `gh` (optional, for PR lookups)
+
+## Error Handling
+
+### `cctop install` without `jq`
+Abort with a clear error message: "jq is required for hooks. Install it with: brew install jq"
+
+### `cctop` without `cctop install`
+The TUI starts but shows a warning banner: "Hooks not installed — run `cctop install` for real-time status. Currently showing basic session info only." Session discovery and metadata from Sources 1+2 still work; only real-time tool status (Source 3) is missing.
+
+### `gh` not installed or not authenticated
+PR lookup silently skips. The `pr_url` and `pr_title` fields remain `None`. No error shown to the user — PR info is a nice-to-have.
+
+### Corrupt JSONL lines in `events.jsonl`
+The events tailer skips malformed lines with a `loguru.warning()`. Never crashes on bad input.
+
+### `settings.json` concurrent writes
+Install/uninstall uses atomic write (write to temp file + `os.rename()`). Warns the user to not run install/uninstall while another tool is modifying settings.
+
+### Events file growth
+On TUI startup, if `events.jsonl` exceeds 10 MB, truncate events older than 24 hours. The file is an append-only log of transient status data — historical events beyond 24h have no value since sessions-index.json provides the durable metadata.

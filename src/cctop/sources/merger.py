@@ -165,7 +165,7 @@ class SessionManager:
                 # Session reappeared — clear any missing-pid tracking
                 self._missing_pids.pop(sid, None)
 
-    def _resolve_session(self, event: Event) -> Session | None:
+    def _resolve_session(self, event: Event, allow_cwd_mapping: bool = True) -> Session | None:
         """Resolve a hook event to a Session, handling the session ID mismatch.
 
         When Claude resumes a session, the PID file gets a new session ID, but hooks
@@ -173,6 +173,9 @@ class SessionManager:
         1. Direct lookup (hook sid == pid-file sid, for sessions started after install)
         2. Cached mapping (we've seen this hook sid before and mapped it)
         3. CWD-based mapping (hook event cwd matches an active session's cwd)
+           Only used for tool_start/tool_end/stop — not session_start/session_end,
+           which can fire from transient subprocesses (e.g. `claude --print` spawned
+           by generate_summary) that share the same cwd but are not the real session.
         """
         # Direct match
         session = self._sessions.get(event.sid)
@@ -185,7 +188,7 @@ class SessionManager:
             return self._sessions.get(pid_sid)
 
         # CWD-based mapping: match hook event's cwd to a known session
-        if event.cwd:
+        if allow_cwd_mapping and event.cwd:
             pid_sid = self._cwd_to_pid_sid.get(event.cwd)
             if pid_sid:
                 self._hook_sid_to_pid_sid[event.sid] = pid_sid
@@ -207,7 +210,11 @@ class SessionManager:
     def apply_events(self, events: list[Event]) -> None:
         """Apply hook events to update session status."""
         for event in events:
-            session = self._resolve_session(event)
+            # session_start/session_end can fire from transient subprocesses (e.g.
+            # `claude --print` spawned by generate_summary). Only allow CWD-based
+            # resolution for events that indicate real Claude Code work activity.
+            allow_cwd = event.type in ("tool_start", "tool_end", "stop")
+            session = self._resolve_session(event, allow_cwd_mapping=allow_cwd)
             if session is None:
                 continue
 

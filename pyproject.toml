@@ -1,0 +1,43 @@
+[project]
+name = "cctop"
+version = "0.1.0"
+description = "A htop-like TUI for monitoring Claude Code sessions"
+readme = "README.md"
+authors = [
+    { name = "Yorrick Jansen", email = "yorrick.jansen@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "textual>=3.0",
+    "typer>=0.15",
+    "pydantic>=2.0",
+    "loguru",
+]
+
+[project.scripts]
+cctop = "cctop.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+    "pyright",
+    "pre-commit",
+    "textual-dev",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"

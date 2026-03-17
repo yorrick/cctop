@@ -2,7 +2,7 @@ import asyncio
 import json
 from pathlib import Path
 
-import anthropic
+from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
 from loguru import logger
 
 from cctop.sources.index import _SYSTEM_TAG_RE
@@ -84,7 +84,7 @@ def strip_transcript(transcript_path: Path) -> str:
 
 
 async def generate_summary(transcript_path: Path) -> str | None:
-    """Generate a 1-sentence summary of a session transcript via Claude API.
+    """Generate a 1-sentence summary of a session transcript via Claude Code SDK.
 
     Uses Claude Code subscription credentials (no ANTHROPIC_API_KEY needed).
     Returns None on any failure — callers should fall back to existing summary.
@@ -101,31 +101,28 @@ async def generate_summary(transcript_path: Path) -> str | None:
     )
 
     try:
-        import httpx
+        result_text: str | None = None
 
-        client = anthropic.AsyncAnthropic(
-            timeout=httpx.Timeout(10.0, connect=5.0),
-        )
-        response = await asyncio.wait_for(
-            client.messages.create(
-                model="claude-haiku-4-5",
-                max_tokens=50,
-                messages=[{"role": "user", "content": prompt}],
-            ),
-            timeout=15.0,
-        )
-        block = response.content[0]
-        if not isinstance(block, anthropic.types.TextBlock):
+        async def _run() -> str | None:
+            async for message in query(
+                prompt=prompt,
+                options=ClaudeAgentOptions(
+                    allowed_tools=[],
+                    model="claude-haiku-4-5",
+                    max_turns=1,
+                ),
+            ):
+                if isinstance(message, ResultMessage):
+                    return message.result.strip() if message.result else None
             return None
-        text = block.text.strip()
-        logger.debug("Generated summary for {}: {}", transcript_path.stem, text)
-        return text
-    except anthropic.AuthenticationError as e:
-        logger.warning("Anthropic auth failed — Claude subscription required: {}", e)
-        return None
-    except anthropic.APIError as e:
-        logger.warning("Anthropic API error for {}: {}", transcript_path.stem, e)
-        return None
+
+        result_text = await asyncio.wait_for(_run(), timeout=30.0)
+        if result_text:
+            logger.debug("Generated summary for {}: {}", transcript_path.stem, result_text)
+        return result_text
     except asyncio.TimeoutError:
         logger.warning("Summary generation timed out for {}", transcript_path.stem)
+        return None
+    except Exception as e:
+        logger.warning("Summary generation failed for {}: {}", transcript_path.stem, e)
         return None

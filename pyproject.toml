@@ -21,6 +21,12 @@ cctop = "cctop.cli:app"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/cctop"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/cctop/hooks/cctop-hook.sh" = "cctop/hooks/cctop-hook.sh"
+
 [tool.uv]
 dev-dependencies = [
     "pytest",

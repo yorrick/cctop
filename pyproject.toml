@@ -1,18 +1,35 @@
 [project]
-name = "cctop"
+name = "claude-cctop"
 version = "0.1.0"
-description = "A htop-like TUI for monitoring Claude Code sessions"
+description = "A htop-like TUI for monitoring Claude Code sessions in real-time"
 readme = "README.md"
+license = "MIT"
 authors = [
     { name = "Yorrick Jansen", email = "yorrick.jansen@gmail.com" }
 ]
 requires-python = ">=3.12"
+keywords = ["claude", "claude-code", "tui", "terminal", "monitoring", "sessions", "htop"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Monitoring",
+]
 dependencies = [
     "textual>=3.0",
     "typer>=0.15",
     "pydantic>=2.0",
     "loguru",
 ]
+
+[project.urls]
+Homepage = "https://github.com/yorrick/cctop"
+Repository = "https://github.com/yorrick/cctop"
+Issues = "https://github.com/yorrick/cctop/issues"
 
 [project.scripts]
 cctop = "cctop.cli:app"

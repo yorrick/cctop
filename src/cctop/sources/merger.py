@@ -31,6 +31,10 @@ class SessionManager:
         self._hook_sid_to_pid_sid: dict[str, str] = {}
         # Maps cwd -> PID-file session ID for reverse lookup
         self._cwd_to_pid_sid: dict[str, str] = {}
+        # Sessions that received a Stop event (Claude finished its turn).
+        # Only these are candidates for idle transition after grace period.
+        # Sessions with only tool_end events stay "working" (Claude is still thinking).
+        self._stopped_sessions: set[str] = set()
 
     @property
     def sessions(self) -> list[Session]:
@@ -95,15 +99,17 @@ class SessionManager:
             self._sessions[raw.session_id] = session
             self._cwd_to_pid_sid[str(raw.cwd)] = raw.session_id
 
-        # Apply idle grace period: if a session is "working" but has no current tool
-        # and last_activity was more than IDLE_GRACE_SECONDS ago, transition to idle.
+        # Apply idle grace period: only transition to idle if Claude has finished
+        # its turn (Stop event received) AND the grace period has elapsed.
+        # Sessions between tool calls (no Stop) stay "working".
         for session in self._sessions.values():
             if (
                 session.status == "working"
-                and session.current_tool is None
+                and session.session_id in self._stopped_sessions
                 and (now - session.last_activity).total_seconds() > IDLE_GRACE_SECONDS
             ):
                 session.status = "idle"
+                self._stopped_sessions.discard(session.session_id)
 
         for sid in list(self._sessions.keys()):
             if sid not in seen_ids:
@@ -170,18 +176,25 @@ class SessionManager:
                     session.status = "working"
                     session.current_tool = event.tool
                     session.last_activity = now_ts
-                case "tool_end" | "stop":
-                    # Don't immediately flip to idle — keep "working" status
-                    # and let the grace period in refresh() handle the transition.
-                    # Just clear the current tool and update last_activity.
+                    # New tool call means Claude is active again
+                    self._stopped_sessions.discard(session.session_id)
+                case "tool_end":
+                    # Tool finished but Claude may call another — stay working
                     session.current_tool = None
                     session.last_activity = now_ts
+                case "stop":
+                    # Claude finished its turn — candidate for idle after grace period
+                    session.current_tool = None
+                    session.last_activity = now_ts
+                    self._stopped_sessions.add(session.session_id)
                 case "session_end":
                     session.status = "offline"
                     session.ended_at = now_ts
                     session.last_activity = now_ts
+                    self._stopped_sessions.discard(session.session_id)
                 case "session_start":
                     session.last_activity = now_ts
+                    self._stopped_sessions.discard(session.session_id)
 
 
 _git_branch_cache: dict[str, str | None] = {}

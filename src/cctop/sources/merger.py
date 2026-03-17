@@ -1,3 +1,4 @@
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -76,6 +77,10 @@ class SessionManager:
                 session.git_branch = entry.git_branch
                 session.message_count = entry.message_count
 
+            # If no git branch from index, detect from the working directory
+            if not session.git_branch:
+                session.git_branch = _detect_git_branch(raw.cwd)
+
             self._sessions[raw.session_id] = session
 
         for sid in list(self._sessions.keys()):
@@ -115,3 +120,31 @@ class SessionManager:
                     session.last_activity = now_ts
                 case "session_start":
                     session.last_activity = now_ts
+
+
+_git_branch_cache: dict[str, str | None] = {}
+
+
+def _detect_git_branch(cwd: Path) -> str | None:
+    """Detect the current git branch for a working directory."""
+    cwd_str = str(cwd)
+    if cwd_str in _git_branch_cache:
+        return _git_branch_cache[cwd_str]
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0:
+            branch = result.stdout.strip()
+            _git_branch_cache[cwd_str] = branch
+            return branch
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
+    _git_branch_cache[cwd_str] = None
+    return None

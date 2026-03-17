@@ -28,7 +28,7 @@ class CctopApp(App):
     TITLE = "cctop"
     CSS = """
     Header {
-        height: 1;
+        height: 2;
         background: $surface;
     }
     Footer {

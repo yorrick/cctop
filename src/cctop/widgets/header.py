@@ -46,4 +46,14 @@ class Header(Static):
         line.append(padding)
         line.append(f"Sort: [{sort_label} ▼]", style="dim")
 
+        # Column headers
+        line.append("\n")
+        line.append("     ", style="dim")
+        line.append(f"{'PROJECT':<24}", style="dim bold")
+        line.append(f"{'BRANCH':<16}", style="dim bold")
+        line.append(f"{'STATUS':<20}", style="dim bold")
+        line.append(f"{'DURATION':>8}", style="dim bold")
+        line.append("  ", style="dim")
+        line.append(f"{'IDLE':>6}", style="dim bold")
+
         return line

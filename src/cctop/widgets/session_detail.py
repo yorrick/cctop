@@ -3,13 +3,16 @@ from textual.widgets import Static
 
 from cctop.models import Session
 
+_GENERATING = "Generating..."
+
 
 class SessionDetail(Static):
     """Expanded detail view for a session."""
 
-    def __init__(self, session: Session, **kwargs) -> None:
+    def __init__(self, session: Session, llm_summary: str | None = None, **kwargs) -> None:
         super().__init__(**kwargs)
         self.session = session
+        self.llm_summary = llm_summary
 
     def render(self) -> Text:
         s = self.session
@@ -19,10 +22,14 @@ class SessionDetail(Static):
             lines.append(f"  │  PR: {s.pr_title}\n", style="blue")
             lines.append(f"  │  {s.pr_url}\n", style="dim blue")
 
-        if s.summary:
-            lines.append(f"  │  Summary: {s.summary}\n", style="white")
-
-        if s.first_prompt:
+        # LLM summary takes priority; "Generating..." shown dim
+        display_summary = self.llm_summary or s.summary
+        if display_summary:
+            if display_summary == _GENERATING:
+                lines.append(f"  │  Summary: {display_summary}\n", style="dim")
+            else:
+                lines.append(f"  │  Summary: {display_summary}\n", style="white")
+        elif s.first_prompt:
             prompt = s.first_prompt[:120] + "..." if len(s.first_prompt) > 120 else s.first_prompt
             lines.append(f"  │  Prompt: {prompt}\n", style="dim")
 

@@ -67,6 +67,13 @@ class CctopApp(App):
         yield Footer()
 
     async def on_mount(self) -> None:
+        self._tailer.cleanup_if_needed()
+        if not self._tailer.hooks_installed:
+            self.notify(
+                "Hooks not installed — run 'cctop install' for real-time status.",
+                severity="warning",
+                timeout=10,
+            )
         self.set_interval(2, self._poll_fast)
         self.set_interval(10, self._poll_slow)
         self._poll_fast()

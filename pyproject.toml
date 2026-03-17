@@ -65,6 +65,7 @@ select = ["E", "F", "I"]
 [tool.pytest.ini_options]
 markers = ["contract: contract tests that run real Claude Code sessions (require claude CLI, cost tokens)"]
 addopts = "-m 'not contract'"
+asyncio_mode = "auto"
 
 [tool.pyright]
 pythonVersion = "3.12"

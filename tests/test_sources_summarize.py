@@ -1,7 +1,12 @@
+import asyncio
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from cctop.sources.summarize import strip_transcript
+import anthropic
+import pytest
+
+from cctop.sources.summarize import generate_summary, strip_transcript
 
 
 def _write_transcript(path: Path, messages: list[dict]) -> None:  # type: ignore[type-arg]
@@ -114,3 +119,85 @@ def test_strip_transcript_empty_file(tmp_path: Path) -> None:
     t.write_text("")
     result = strip_transcript(t)
     assert result == ""
+
+
+@pytest.mark.asyncio
+async def test_generate_summary_success(tmp_path: Path) -> None:
+    """Returns summary string on success."""
+    t = tmp_path / "sess.jsonl"
+    _write_transcript(
+        t,
+        [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "Fix the login bug"}]}},
+        ],
+    )
+
+    mock_response = MagicMock()
+    text_block = anthropic.types.TextBlock(type="text", text="Fixing login authentication bug")
+    mock_response.content = [text_block]
+
+    with patch("cctop.sources.summarize.anthropic.AsyncAnthropic") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client_cls.return_value = mock_client
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+        result = await generate_summary(t)
+
+    assert result == "Fixing login authentication bug"
+
+
+@pytest.mark.asyncio
+async def test_generate_summary_auth_error(tmp_path: Path) -> None:
+    """Returns None on AuthenticationError."""
+    t = tmp_path / "sess.jsonl"
+    _write_transcript(
+        t,
+        [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "Hello"}]}},
+        ],
+    )
+
+    with patch("cctop.sources.summarize.anthropic.AsyncAnthropic") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client_cls.return_value = mock_client
+        mock_client.messages.create = AsyncMock(
+            side_effect=anthropic.AuthenticationError(message="No auth", response=MagicMock(), body={})
+        )
+
+        result = await generate_summary(t)
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_generate_summary_timeout(tmp_path: Path) -> None:
+    """Returns None on timeout."""
+    t = tmp_path / "sess.jsonl"
+    _write_transcript(
+        t,
+        [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "Hello"}]}},
+        ],
+    )
+
+    with patch("cctop.sources.summarize.anthropic.AsyncAnthropic") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client_cls.return_value = mock_client
+        mock_client.messages.create = AsyncMock(side_effect=asyncio.TimeoutError())
+
+        result = await generate_summary(t)
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_generate_summary_empty_transcript(tmp_path: Path) -> None:
+    """Returns None without making API call when transcript is empty."""
+    t = tmp_path / "sess.jsonl"
+    t.write_text("")
+
+    with patch("cctop.sources.summarize.anthropic.AsyncAnthropic") as mock_client_cls:
+        result = await generate_summary(t)
+        mock_client_cls.assert_not_called()
+
+    assert result is None

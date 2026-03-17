@@ -22,7 +22,7 @@ class SessionList(VerticalScroll):
         Binding("up", "cursor_up", "Up"),
         Binding("down", "cursor_down", "Down"),
         Binding("enter", "toggle_expand", "Expand/Collapse"),
-        Binding("r", "regenerate_summary", "Regenerate summary", show=False),
+        Binding("r", "regenerate_summary", "Regenerate summary"),
     ]
 
     def __init__(self, projects_dir: Path | None = None, **kwargs) -> None:

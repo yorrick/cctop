@@ -1,5 +1,6 @@
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 
 from loguru import logger
@@ -147,3 +148,40 @@ def _read_transcript_metadata(session_id: str, transcript_path: Path) -> IndexEn
             "messageCount": message_count,
         }
     )
+
+
+def find_transcript_path(
+    projects_dir: Path,
+    cwd: Path,
+    session_id: str,
+    started_at: datetime,
+) -> Path | None:
+    """Find the .jsonl transcript path for a session.
+
+    Step 1: direct match by session_id.
+    Step 2: scan for most-recently-modified .jsonl after started_at (handles
+            resumed sessions where PID-file ID differs from transcript ID).
+    """
+    encoded = encode_cwd(cwd)
+    project_dir = projects_dir / encoded
+
+    # Step 1: direct match
+    direct = project_dir / f"{session_id}.jsonl"
+    if direct.is_file():
+        return direct
+
+    if not project_dir.is_dir():
+        return None
+
+    # Step 2: find most-recently-modified .jsonl modified after session started
+    started_ts = started_at.timestamp()
+    candidates: list[Path] = []
+    for t in project_dir.glob("*.jsonl"):
+        if t.stem != session_id and t.stat().st_mtime >= started_ts - 300:
+            candidates.append(t)
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0]

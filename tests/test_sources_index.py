@@ -1,7 +1,10 @@
 import json
+import os
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
-from cctop.sources.index import encode_cwd, find_index_entry
+from cctop.sources.index import encode_cwd, find_index_entry, find_transcript_path
 
 
 def test_encode_cwd() -> None:
@@ -54,3 +57,49 @@ def test_find_index_entry_not_found(tmp_path: Path) -> None:
 def test_find_index_entry_no_index_file(tmp_path: Path) -> None:
     entry = find_index_entry(tmp_path, Path("/tmp/test"), "abc-123")
     assert entry is None
+
+
+def test_find_transcript_path_direct_match(tmp_path: Path) -> None:
+    """Direct match: <session_id>.jsonl exists."""
+    projects_dir = tmp_path
+    cwd = Path("/tmp/myproject")
+    session_id = "abc-123"
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    project_dir = tmp_path / "-tmp-myproject"
+    project_dir.mkdir()
+    transcript = project_dir / f"{session_id}.jsonl"
+    transcript.write_text('{"type":"user"}\n')
+
+    result = find_transcript_path(projects_dir, cwd, session_id, started_at)
+    assert result == transcript
+
+
+def test_find_transcript_path_fallback_active(tmp_path: Path) -> None:
+    """Fallback: no direct match, finds most-recently-modified .jsonl."""
+    projects_dir = tmp_path
+    cwd = Path("/tmp/myproject")
+    session_id = "pid-session-id"
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    project_dir = tmp_path / "-tmp-myproject"
+    project_dir.mkdir()
+
+    # A different transcript (the actual transcript for a resumed session)
+    other = project_dir / "transcript-abc.jsonl"
+    other.write_text('{"type":"user"}\n')
+    # Set mtime to after started_at
+    os.utime(other, (time.time(), started_at.timestamp() + 60))
+
+    result = find_transcript_path(projects_dir, cwd, session_id, started_at)
+    assert result == other
+
+
+def test_find_transcript_path_no_match(tmp_path: Path) -> None:
+    """Returns None when no transcript found."""
+    projects_dir = tmp_path
+    cwd = Path("/tmp/myproject")
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    result = find_transcript_path(projects_dir, cwd, "nonexistent", started_at)
+    assert result is None

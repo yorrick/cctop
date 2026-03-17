@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 from loguru import logger
@@ -54,6 +55,44 @@ def find_index_entry(projects_dir: Path, cwd: Path, session_id: str) -> IndexEnt
     return None
 
 
+# System tags injected by Claude Code into user messages — not actual user content
+_SYSTEM_TAGS = (
+    "local-command-caveat",
+    "system-reminder",
+    "command-name",
+    "command-message",
+    "command-args",
+    "local-command-stdout",
+    "bash-input",
+    "bash-stdout",
+    "bash-stderr",
+    "task-notification",
+)
+_TAG_GROUP = "|".join(_SYSTEM_TAGS)
+_SYSTEM_TAG_RE = re.compile(
+    rf"<(?:{_TAG_GROUP})[^>]*>.*?</(?:{_TAG_GROUP})>",
+    re.DOTALL,
+)
+
+
+def _extract_user_text(data: dict) -> str | None:  # type: ignore[type-arg]
+    """Extract clean user text from a transcript user message, stripping system tags."""
+    content = data.get("message", {}).get("content", "")
+    if isinstance(content, list):
+        for block in content:
+            if block.get("type") == "text":
+                text = block["text"]
+                # Strip system tags
+                text = _SYSTEM_TAG_RE.sub("", text).strip()
+                if text:
+                    return text
+    elif isinstance(content, str):
+        text = _SYSTEM_TAG_RE.sub("", content).strip()
+        if text:
+            return text
+    return None
+
+
 def _read_transcript_metadata(session_id: str, transcript_path: Path) -> IndexEntry | None:
     """Extract metadata from a session transcript JSONL file."""
     first_prompt: str | None = None
@@ -74,14 +113,9 @@ def _read_transcript_metadata(session_id: str, transcript_path: Path) -> IndexEn
                 if msg_type == "user":
                     message_count += 1
                     if first_prompt is None:
-                        content = data.get("message", {}).get("content", "")
-                        if isinstance(content, list):
-                            for block in content:
-                                if block.get("type") == "text":
-                                    first_prompt = block["text"][:200]
-                                    break
-                        elif isinstance(content, str):
-                            first_prompt = content[:200]
+                        text = _extract_user_text(data)
+                        if text:
+                            first_prompt = text[:200]
 
                 elif msg_type == "assistant":
                     message_count += 1

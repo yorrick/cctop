@@ -63,7 +63,7 @@ class CctopApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield SessionList()
+        yield SessionList(projects_dir=self._manager.projects_dir)
         yield Footer()
 
     async def on_mount(self) -> None:

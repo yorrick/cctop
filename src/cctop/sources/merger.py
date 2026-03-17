@@ -43,6 +43,10 @@ class SessionManager:
         self._missing_pids: dict[str, datetime] = {}
 
     @property
+    def projects_dir(self) -> Path:
+        return self._projects_dir
+
+    @property
     def sessions(self) -> list[Session]:
         """Return sessions sorted by status (working first, then idle, then offline)."""
         return list(self._sessions.values())

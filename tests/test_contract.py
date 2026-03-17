@@ -5,6 +5,13 @@ cctop depends on, and that SessionManager correctly ingests them.
 
 Run with: pytest -m contract
 Requires: claude CLI installed, costs API tokens.
+
+Key contract findings documented by these tests:
+- --print sessions do NOT create PID files (only interactive sessions do)
+- Hook events and transcripts DO work for --print sessions
+- Claude Code replaces both / and _ with - in project directory encoding
+- session_end fires on /clear AND on process exit (not just exit)
+- --resume reuses the original session ID in hooks and appends to transcript
 """
 
 from __future__ import annotations
@@ -26,15 +33,15 @@ import pytest
 from cctop.models import Event
 from cctop.sources.index import encode_cwd
 from cctop.sources.merger import SessionManager
+from cctop.sources.sessions import is_pid_alive
 
 T = TypeVar("T")
 
 CLAUDE_SESSIONS_DIR = Path.home() / ".claude" / "sessions"
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
-# Timeouts
-SHORT_SESSION_TIMEOUT = 30
-LONG_SESSION_TIMEOUT = 90
+SHORT_SESSION_TIMEOUT = 60
+LONG_SESSION_TIMEOUT = 120
 POLL_TIMEOUT = 30.0
 POLL_INTERVAL = 0.5
 
@@ -94,35 +101,6 @@ def snapshot_pid_files() -> set[str]:
     return {p.name for p in CLAUDE_SESSIONS_DIR.glob("*.json")}
 
 
-def find_new_pid_file(before: set[str]) -> dict | None:  # type: ignore[type-arg]
-    """Find a PID file that appeared after the snapshot. Returns parsed data or None."""
-    if not CLAUDE_SESSIONS_DIR.is_dir():
-        return None
-    current = {p.name for p in CLAUDE_SESSIONS_DIR.glob("*.json")}
-    new_files = current - before
-    for name in new_files:
-        path = CLAUDE_SESSIONS_DIR / name
-        try:
-            data = json.loads(path.read_text().split("\n", 1)[0])
-            pid = data["pid"]
-            try:
-                os.kill(pid, 0)
-                data["_alive"] = True
-            except ProcessLookupError:
-                data["_alive"] = False
-            except PermissionError:
-                data["_alive"] = True
-            return data
-        except (json.JSONDecodeError, KeyError, OSError):
-            continue
-    return None
-
-
-def pid_file_exists(pid: int) -> bool:
-    """Check if a PID file exists for the given PID."""
-    return (CLAUDE_SESSIONS_DIR / f"{pid}.json").is_file()
-
-
 def transcript_path(work_dir: Path, session_id: str) -> Path:
     """Return the expected transcript path for a session."""
     encoded = encode_cwd(work_dir)
@@ -145,6 +123,12 @@ def read_transcript_messages(work_dir: Path, session_id: str) -> list[dict]:  # 
     return messages
 
 
+def _write_session_file(sessions_dir: Path, pid: int, session_id: str, cwd: str) -> None:
+    """Write a synthetic PID file for testing SessionManager integration."""
+    data = {"pid": pid, "sessionId": session_id, "cwd": cwd, "startedAt": int(time.time() * 1000)}
+    (sessions_dir / f"{pid}.json").write_text(json.dumps(data))
+
+
 def run_claude_print(
     work_dir: Path,
     session_id: str,
@@ -155,7 +139,7 @@ def run_claude_print(
     timeout: int = SHORT_SESSION_TIMEOUT,
 ) -> subprocess.CompletedProcess[str]:
     """Run a claude --print session synchronously."""
-    cmd = ["claude", "--print"]
+    cmd = ["claude", "--print", "--model", "haiku"]
     if resume:
         cmd += ["--resume", session_id]
     else:
@@ -189,6 +173,8 @@ def background_claude(
     cmd = [
         "claude",
         "--print",
+        "--model",
+        "haiku",
         "--session-id",
         session_id,
         "--dangerously-skip-permissions",
@@ -245,7 +231,6 @@ def test_basic_lifecycle(tmp_path: Path) -> None:
         result = run_claude_print(work_dir, session_id, "respond with just the word PONG", events_dir)
         assert result.returncode == 0, f"claude --print failed: {result.stderr}"
 
-        # -- Raw contract assertions --
         events = read_events(events_dir, session_id=session_id)
         event_types = [e["type"] for e in events]
 
@@ -253,17 +238,14 @@ def test_basic_lifecycle(tmp_path: Path) -> None:
         assert "stop" in event_types, f"No stop event. Events: {event_types}"
         assert "session_end" in event_types, f"No session_end event. Events: {event_types}"
 
-        # Order: session_start before stop before session_end
         start_idx = event_types.index("session_start")
         stop_idx = event_types.index("stop")
         end_idx = event_types.index("session_end")
         assert start_idx < stop_idx < end_idx, f"Wrong event order: {event_types}"
 
-        # session_start has correct cwd
         start_event = events[start_idx]
         assert start_event["cwd"] == str(work_dir), f"session_start cwd mismatch: {start_event['cwd']} != {work_dir}"
 
-        # Transcript exists and has messages
         tpath = transcript_path(work_dir, session_id)
         assert tpath.is_file(), f"Transcript not found at {tpath}"
 
@@ -272,20 +254,6 @@ def test_basic_lifecycle(tmp_path: Path) -> None:
         asst_msgs = [m for m in messages if m["type"] == "assistant"]
         assert len(user_msgs) >= 1, f"Expected at least 1 user message, got {len(user_msgs)}"
         assert len(asst_msgs) >= 1, f"Expected at least 1 assistant message, got {len(asst_msgs)}"
-
-        # -- Integration assertion --
-        # After exit, process is dead and PID file should be cleaned up.
-        time.sleep(2)
-
-        # SessionManager with recent=0 should not show dead sessions.
-        # The PID-file cwd may differ from work_dir (Claude Code uses parent shell cwd),
-        # but the session should still not be visible since the process is dead.
-        mgr = SessionManager(sessions_dir=CLAUDE_SESSIONS_DIR, projects_dir=CLAUDE_PROJECTS_DIR)
-        mgr.refresh()
-        # Verify no session exists for our session_id or PID-file session ID
-        # (both should be evicted since process is dead)
-        for s in mgr.sessions:
-            assert s.session_id != session_id, f"Dead session {session_id} still visible in SessionManager"
     finally:
         cleanup_transcript(work_dir, session_id)
 
@@ -302,13 +270,11 @@ def test_session_resumption(tmp_path: Path) -> None:
     try:
         result1 = run_claude_print(work_dir, session_id, "respond with just the word PONG", events_dir)
         assert result1.returncode == 0, f"First session failed: {result1.stderr}"
-
         time.sleep(2)
 
         result2 = run_claude_print(work_dir, session_id, "respond with just the word PING", events_dir, resume=True)
         assert result2.returncode == 0, f"Resume session failed: {result2.stderr}"
 
-        # -- Raw contract assertions --
         events = read_events(events_dir, session_id=session_id)
         event_types = [e["type"] for e in events]
 
@@ -332,54 +298,39 @@ def test_session_resumption(tmp_path: Path) -> None:
 
 
 @pytest.mark.contract
-def test_long_lived_session(tmp_path: Path) -> None:
-    """While a session is running, SessionManager sees it as working/idle, not offline."""
+def test_long_lived_session_events(tmp_path: Path) -> None:
+    """A long-running --print session produces tool_start/tool_end events while active."""
     session_id = str(uuid.uuid4())
     events_dir = tmp_path / "events"
     events_dir.mkdir()
     work_dir = tmp_path / "project"
     work_dir.mkdir()
-    pid_snapshot = snapshot_pid_files()
 
     try:
         with background_claude(work_dir, session_id, LONG_RUNNING_PROMPT, events_dir):
-            # Wait for tool activity
+            # Wait for session_start
+            wait_for(
+                lambda: any(e["type"] == "session_start" for e in read_events(events_dir, session_id=session_id)),
+                desc="session_start event",
+            )
+
+            # Wait for tool_start (Bash tool for running the script)
             wait_for(
                 lambda: any(e["type"] == "tool_start" for e in read_events(events_dir, session_id=session_id)),
                 desc="tool_start event",
             )
 
-            # Find the new PID file (appeared after our snapshot)
-            pid_data = wait_for(lambda: find_new_pid_file(pid_snapshot), desc="new PID file")
-            assert pid_data is not None
-            assert pid_data["_alive"], "PID should be alive"
+            # Verify tool events are present
+            events = read_events(events_dir, session_id=session_id)
+            tool_events = [e for e in events if e["type"] in ("tool_start", "tool_end")]
+            assert len(tool_events) >= 1, f"Expected tool events, got: {[e['type'] for e in events]}"
 
-            # -- Integration assertion --
-            # SessionManager discovers session via PID file, then we apply events
-            mgr = SessionManager(
-                sessions_dir=CLAUDE_SESSIONS_DIR,
-                projects_dir=CLAUDE_PROJECTS_DIR,
-                recent=timedelta(hours=1),
-            )
-            mgr.refresh()
-            events_typed = read_events_typed(events_dir, session_id=session_id)
-            mgr.apply_events(events_typed)
+            # Transcript should be growing
+            tpath = transcript_path(work_dir, session_id)
+            assert tpath.is_file(), f"Transcript not found at {tpath}"
 
-            # Find our session by PID-file session ID
-            pid_sid = pid_data["sessionId"]
-            our_session = next((s for s in mgr.sessions if s.session_id == pid_sid), None)
-            assert our_session is not None, (
-                f"Session {pid_sid} not in SessionManager. IDs: {[s.session_id for s in mgr.sessions]}"
-            )
-            assert our_session.status in ("working", "idle"), (
-                f"Session should be working or idle, got: {our_session.status}"
-            )
-
-        # After context manager kills the process, wait for cleanup
-        time.sleep(3)
-
-        assert not pid_file_exists(pid_data["pid"]), "PID file should be removed after exit"
-
+        # After exit, session_end should appear
+        time.sleep(2)
         events = read_events(events_dir, session_id=session_id)
         event_types = [e["type"] for e in events]
         assert "session_end" in event_types, f"No session_end after exit. Events: {event_types}"
@@ -388,11 +339,11 @@ def test_long_lived_session(tmp_path: Path) -> None:
 
 
 @pytest.mark.contract
-def test_session_end_does_not_mean_process_dead(tmp_path: Path) -> None:
-    """A session_end event while the PID is alive must NOT mark the session offline.
+def test_print_sessions_do_not_create_pid_files(tmp_path: Path) -> None:
+    """--print sessions do NOT create PID files (only interactive sessions do).
 
-    This simulates what happens when a user runs /clear: Claude Code fires
-    session_end but the process keeps running.
+    This documents a key contract: cctop cannot discover --print sessions
+    via PID files. It must rely on hook events instead.
     """
     session_id = str(uuid.uuid4())
     events_dir = tmp_path / "events"
@@ -403,138 +354,119 @@ def test_session_end_does_not_mean_process_dead(tmp_path: Path) -> None:
 
     try:
         with background_claude(work_dir, session_id, LONG_RUNNING_PROMPT, events_dir):
-            # Wait for session to be active
+            # Wait for session to be fully active
+            wait_for(
+                lambda: any(e["type"] == "tool_start" for e in read_events(events_dir, session_id=session_id)),
+                desc="tool_start event",
+            )
+            # Give extra time for PID file to appear (if it would)
+            time.sleep(3)
+
+            # No new PID file should have appeared
+            current = snapshot_pid_files()
+            new_files = current - pid_snapshot
+            assert len(new_files) == 0, (
+                f"--print session created PID file(s): {new_files}. "
+                f"Contract violation: --print sessions should not create PID files."
+            )
+    finally:
+        cleanup_transcript(work_dir, session_id)
+
+
+@pytest.mark.contract
+def test_session_end_does_not_mean_process_dead(tmp_path: Path) -> None:
+    """A session_end event while the PID is alive must NOT mark the session offline.
+
+    Uses a hybrid approach: real Claude Code events for the session lifecycle,
+    combined with a synthetic PID file to test SessionManager's handling of
+    session_end when a PID is still alive. This simulates what happens when a
+    user runs /clear in an interactive session.
+    """
+    session_id = str(uuid.uuid4())
+    events_dir = tmp_path / "events"
+    events_dir.mkdir()
+    work_dir = tmp_path / "project"
+    work_dir.mkdir()
+    # Synthetic sessions/projects dirs for isolated SessionManager
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    try:
+        with background_claude(work_dir, session_id, LONG_RUNNING_PROMPT, events_dir) as proc:
+            # Wait for real events
             wait_for(
                 lambda: any(e["type"] == "tool_start" for e in read_events(events_dir, session_id=session_id)),
                 desc="tool_start event",
             )
 
-            # Find the new PID file
-            pid_data = wait_for(lambda: find_new_pid_file(pid_snapshot), desc="new PID file")
-            assert pid_data is not None
-            assert pid_data["_alive"]
-            pid_sid = pid_data["sessionId"]
+            # Create a synthetic PID file using the real process's PID
+            # (simulates an interactive session that WOULD have a PID file)
+            pid_sid = "synthetic-" + session_id[:8]
+            _write_session_file(sessions_dir, proc.pid, pid_sid, str(work_dir))
+            assert is_pid_alive(proc.pid), "Background process should be alive"
 
-            # Build SessionManager and load initial state
+            # Build SessionManager with synthetic sessions dir
             mgr = SessionManager(
-                sessions_dir=CLAUDE_SESSIONS_DIR,
-                projects_dir=CLAUDE_PROJECTS_DIR,
+                sessions_dir=sessions_dir,
+                projects_dir=projects_dir,
                 recent=timedelta(hours=1),
             )
             mgr.refresh()
-            events_typed = read_events_typed(events_dir, session_id=session_id)
-            mgr.apply_events(events_typed)
 
-            # Verify session is alive
-            our_session = next((s for s in mgr.sessions if s.session_id == pid_sid), None)
-            assert our_session is not None
-            assert our_session.status in ("working", "idle")
+            # Verify session is discovered and alive
+            assert len(mgr.sessions) == 1
+            assert mgr.sessions[0].status == "idle"
+            assert mgr.sessions[0].session_id == pid_sid
 
-            # Inject a fake session_end event (simulates /clear)
-            fake_event = {"ts": int(time.time() * 1000), "sid": session_id, "type": "session_end"}
-            events_file = events_dir / "events.jsonl"
-            with events_file.open("a") as f:
-                f.write(json.dumps(fake_event) + "\n")
-
-            # Re-read events and apply to fresh manager
-            all_events = read_events_typed(events_dir, session_id=session_id)
-            mgr2 = SessionManager(
-                sessions_dir=CLAUDE_SESSIONS_DIR,
-                projects_dir=CLAUDE_PROJECTS_DIR,
-                recent=timedelta(hours=1),
+            # Apply a session_end event for this session
+            session_end_event = Event(
+                ts=int(time.time() * 1000),
+                sid=pid_sid,
+                type="session_end",
             )
-            mgr2.refresh()
-            mgr2.apply_events(all_events)
+            mgr.apply_events([session_end_event])
 
             # THE KEY ASSERTION: session must NOT be offline because PID is alive
-            our_session = next((s for s in mgr2.sessions if s.session_id == pid_sid), None)
-            assert our_session is not None, "Session disappeared from SessionManager"
-            assert our_session.status != "offline", (
-                f"Session is offline despite PID being alive! "
-                f"session_end should not kill a live session. "
-                f"Status: {our_session.status}"
+            assert mgr.sessions[0].status != "offline", (
+                f"Session is offline despite PID {proc.pid} being alive! session_end should not kill a live session."
             )
     finally:
         cleanup_transcript(work_dir, session_id)
 
 
 @pytest.mark.contract
-def test_pid_file_cleanup_on_exit(tmp_path: Path) -> None:
-    """PID file is removed after the claude process exits normally."""
+def test_session_id_in_events_and_transcript(tmp_path: Path) -> None:
+    """Hook events and transcript both use the --session-id we specified."""
     session_id = str(uuid.uuid4())
     events_dir = tmp_path / "events"
     events_dir.mkdir()
     work_dir = tmp_path / "project"
     work_dir.mkdir()
-    pid_snapshot = snapshot_pid_files()
-
-    try:
-        with background_claude(work_dir, session_id, "respond with just the word PONG", events_dir):
-            # Wait for the PID file to appear
-            pid_data = wait_for(lambda: find_new_pid_file(pid_snapshot), desc="new PID file")
-            assert pid_data is not None
-            recorded_pid = pid_data["pid"]
-            assert pid_file_exists(recorded_pid), "PID file should exist during session"
-
-        # Process has been terminated by context manager
-        time.sleep(3)
-
-        assert not pid_file_exists(recorded_pid), f"PID file for {recorded_pid} still exists after process exit"
-
-        events = read_events(events_dir, session_id=session_id)
-        event_types = [e["type"] for e in events]
-        assert "session_end" in event_types, f"No session_end event after exit. Events: {event_types}"
-    finally:
-        cleanup_transcript(work_dir, session_id)
-
-
-@pytest.mark.contract
-def test_session_id_mapping(tmp_path: Path) -> None:
-    """SessionManager resolves events to the correct session via CWD-based mapping,
-    even when PID file session ID differs from hook session ID."""
-    session_id = str(uuid.uuid4())
-    events_dir = tmp_path / "events"
-    events_dir.mkdir()
-    work_dir = tmp_path / "project"
-    work_dir.mkdir()
-    pid_snapshot = snapshot_pid_files()
 
     try:
         with background_claude(work_dir, session_id, LONG_RUNNING_PROMPT, events_dir):
-            # Wait for tool activity
             wait_for(
                 lambda: any(e["type"] == "tool_start" for e in read_events(events_dir, session_id=session_id)),
                 desc="tool_start event",
             )
 
-            # Get PID file data
-            pid_data = wait_for(lambda: find_new_pid_file(pid_snapshot), desc="new PID file")
-            assert pid_data is not None
-            pid_sid = pid_data["sessionId"]
-
-            # -- Raw contract assertions --
+            # Hook events use our --session-id
             events = read_events(events_dir, session_id=session_id)
             assert len(events) > 0, "No events for our session_id"
 
+            # session_start event has our session_id
+            start_events = [e for e in events if e["type"] == "session_start"]
+            assert len(start_events) >= 1, "No session_start with our session_id"
+            assert start_events[0]["sid"] == session_id
+
+            # Transcript is named after our --session-id
             tpath = transcript_path(work_dir, session_id)
             assert tpath.is_file(), f"Transcript not at expected path {tpath}"
 
-            # PID file sessionId may differ from our --session-id
-            assert "sessionId" in pid_data
-
-            # -- Integration assertion --
-            mgr = SessionManager(
-                sessions_dir=CLAUDE_SESSIONS_DIR,
-                projects_dir=CLAUDE_PROJECTS_DIR,
-                recent=timedelta(hours=1),
-            )
-            mgr.refresh()
-            events_typed = read_events_typed(events_dir, session_id=session_id)
-            mgr.apply_events(events_typed)
-
-            # Session should be discoverable by PID-file session ID
-            our_session = next((s for s in mgr.sessions if s.session_id == pid_sid), None)
-            assert our_session is not None, "Session not found after event application"
-            assert our_session.status in ("working", "idle"), f"Unexpected status: {our_session.status}"
+            # Transcript has actual messages
+            messages = read_transcript_messages(work_dir, session_id)
+            assert len(messages) >= 1, f"Transcript has no messages: {tpath}"
     finally:
         cleanup_transcript(work_dir, session_id)

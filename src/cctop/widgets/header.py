@@ -52,6 +52,8 @@ class Header(Static):
         line.append(f"{'PROJECT':<24}", style="dim bold")
         line.append(f"{'BRANCH':<22}", style="dim bold")
         line.append(f"{'STATUS':<20}", style="dim bold")
+        line.append(f"{'MSGS':>4}", style="dim bold")
+        line.append("  ", style="dim")
         line.append(f"{'DURATION':>8}", style="dim bold")
         line.append("  ", style="dim")
         line.append(f"{'IDLE':>6}", style="dim bold")

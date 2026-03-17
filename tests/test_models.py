@@ -83,12 +83,28 @@ def test_worktree_name_extracted() -> None:
         session_id="abc",
         pid=123,
         cwd=Path("/Users/foo/work/project/.worktrees/dev-loop/issue-349"),
-        project_name="project",
+        project_name="issue-349",
         status="idle",
         started_at=datetime.now(tz=timezone.utc),
         last_activity=datetime.now(tz=timezone.utc),
     )
     assert s.worktree_name == "issue-349"
+    # project_name should be derived from the parent of .worktrees
+    assert s.project_name == "project"
+
+
+def test_worktree_name_single_level() -> None:
+    s = Session(
+        session_id="abc",
+        pid=123,
+        cwd=Path("/Users/foo/work/claude-code-plugins/.worktrees/exploration"),
+        project_name="exploration",
+        status="idle",
+        started_at=datetime.now(tz=timezone.utc),
+        last_activity=datetime.now(tz=timezone.utc),
+    )
+    assert s.worktree_name == "exploration"
+    assert s.project_name == "claude-code-plugins"
 
 
 def test_worktree_name_none_for_regular_path() -> None:

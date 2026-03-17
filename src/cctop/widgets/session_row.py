@@ -57,6 +57,10 @@ class SessionRow(Static):
         else:
             line.append(f"{'Offline':<20}", style="bright_black")
 
+        msgs = str(s.message_count) if s.message_count else "—"
+        line.append(f"{msgs:>4}", style="dim")
+        line.append("  ", style="white")
+
         line.append(f"{format_duration(s.session_duration):>8}", style="white")
         line.append("  ", style="white")
 

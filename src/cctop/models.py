@@ -37,12 +37,20 @@ class Session(BaseModel):
     first_prompt: str | None = None
 
     @model_validator(mode="after")
-    def _extract_worktree_name(self) -> "Session":
-        """Extract worktree name from cwd if it contains a worktrees segment."""
+    def _extract_worktree_info(self) -> "Session":
+        """Extract worktree name and fix project name for worktree paths.
+
+        For a path like /Users/foo/work/project/.worktrees/dev-loop/issue-349:
+        - worktree_name = "issue-349" (last segment)
+        - project_name = "project" (directory before .worktrees)
+        """
         parts = self.cwd.parts
         for i, part in enumerate(parts):
             if part in ("worktrees", ".worktrees") and i + 1 < len(parts):
                 self.worktree_name = parts[-1] if len(parts) > i + 2 else parts[i + 1]
+                # Derive project name from the parent of the worktrees directory
+                if i > 0:
+                    self.project_name = parts[i - 1]
                 break
         return self
 

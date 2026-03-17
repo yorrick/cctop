@@ -129,3 +129,88 @@ def test_merge_enriches_from_index(tmp_path: Path) -> None:
     assert mgr.sessions[0].summary == "Working on tests"
     assert mgr.sessions[0].git_branch == "feat/tests"
     assert mgr.sessions[0].message_count == 10
+
+
+def test_missing_pid_file_grace_period(tmp_path: Path) -> None:
+    """Session stays alive for one refresh cycle if PID file temporarily disappears."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    _write_session_file(sessions_dir, os.getpid(), "abc-123", "/tmp/test")
+
+    mgr = SessionManager(
+        sessions_dir=sessions_dir,
+        projects_dir=projects_dir,
+        recent=timedelta(hours=1),
+    )
+    mgr.refresh()
+    assert mgr.sessions[0].status == "idle"
+
+    # Remove the PID file (simulating a transient read failure)
+    (sessions_dir / f"{os.getpid()}.json").unlink()
+
+    # First refresh after disappearance: session should still be idle (grace period)
+    mgr.refresh()
+    assert len(mgr.sessions) == 1
+    assert mgr.sessions[0].status == "idle"
+
+    # Second refresh: now it should be offline
+    mgr.refresh()
+    assert len(mgr.sessions) == 1
+    assert mgr.sessions[0].status == "offline"
+
+
+def test_missing_pid_file_reappears(tmp_path: Path) -> None:
+    """Session recovers if PID file reappears within the grace period."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    _write_session_file(sessions_dir, os.getpid(), "abc-123", "/tmp/test")
+
+    mgr = SessionManager(
+        sessions_dir=sessions_dir,
+        projects_dir=projects_dir,
+        recent=timedelta(hours=1),
+    )
+    mgr.refresh()
+    assert mgr.sessions[0].status == "idle"
+
+    # Remove and immediately recreate
+    (sessions_dir / f"{os.getpid()}.json").unlink()
+    mgr.refresh()  # Grace period starts
+    assert mgr.sessions[0].status == "idle"
+
+    # File comes back
+    _write_session_file(sessions_dir, os.getpid(), "abc-123", "/tmp/test")
+    mgr.refresh()
+    assert mgr.sessions[0].status == "idle"  # Still alive, not offline
+
+
+def test_pr_data_survives_refresh(tmp_path: Path) -> None:
+    """PR URL and title set on a session must persist across refresh() cycles."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    _write_session_file(sessions_dir, os.getpid(), "abc-123", "/tmp/test")
+
+    mgr = SessionManager(
+        sessions_dir=sessions_dir,
+        projects_dir=projects_dir,
+    )
+    mgr.refresh()
+
+    # Simulate _poll_slow setting PR data on the session object
+    mgr.sessions[0].pr_url = "https://github.com/org/repo/pull/42"
+    mgr.sessions[0].pr_title = "feat: cool feature"
+
+    # Next fast refresh recreates Session objects — PR data must survive
+    mgr.refresh()
+
+    assert mgr.sessions[0].pr_url == "https://github.com/org/repo/pull/42"
+    assert mgr.sessions[0].pr_title == "feat: cool feature"

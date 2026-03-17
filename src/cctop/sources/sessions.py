@@ -51,5 +51,7 @@ def discover_sessions(sessions_dir: Path) -> list[RawSession]:
             )
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             logger.warning("Skipping invalid session file {}: {}", path.name, e)
+        except OSError as e:
+            logger.warning("Could not read session file {}: {}", path.name, e)
 
     return sessions

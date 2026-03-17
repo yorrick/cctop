@@ -20,6 +20,12 @@ class SessionManager:
         self._projects_dir = projects_dir or Path.home() / ".claude" / "projects"
         self._recent = recent
         self._sessions: dict[str, Session] = {}
+        # Maps hook session IDs (transcript IDs) to PID-file session IDs.
+        # When Claude resumes a session, the PID file gets a new session ID,
+        # but hooks still report the original transcript session ID.
+        self._hook_sid_to_pid_sid: dict[str, str] = {}
+        # Maps cwd -> PID-file session ID for reverse lookup
+        self._cwd_to_pid_sid: dict[str, str] = {}
 
     @property
     def sessions(self) -> list[Session]:
@@ -82,6 +88,7 @@ class SessionManager:
                 session.git_branch = _detect_git_branch(raw.cwd)
 
             self._sessions[raw.session_id] = session
+            self._cwd_to_pid_sid[str(raw.cwd)] = raw.session_id
 
         for sid in list(self._sessions.keys()):
             if sid not in seen_ids:
@@ -96,10 +103,48 @@ class SessionManager:
                 elif session.ended_at and (now - session.ended_at) > self._recent:
                     del self._sessions[sid]
 
+    def _resolve_session(self, event: Event) -> Session | None:
+        """Resolve a hook event to a Session, handling the session ID mismatch.
+
+        When Claude resumes a session, the PID file gets a new session ID, but hooks
+        still report the original transcript session ID. We resolve this by:
+        1. Direct lookup (hook sid == pid-file sid, for sessions started after install)
+        2. Cached mapping (we've seen this hook sid before and mapped it)
+        3. CWD-based mapping (hook event cwd matches an active session's cwd)
+        """
+        # Direct match
+        session = self._sessions.get(event.sid)
+        if session is not None:
+            return session
+
+        # Cached mapping
+        pid_sid = self._hook_sid_to_pid_sid.get(event.sid)
+        if pid_sid:
+            return self._sessions.get(pid_sid)
+
+        # CWD-based mapping: match hook event's cwd to a known session
+        if event.cwd:
+            pid_sid = self._cwd_to_pid_sid.get(event.cwd)
+            if pid_sid:
+                self._hook_sid_to_pid_sid[event.sid] = pid_sid
+                # Also use the hook sid (transcript sid) for index lookups
+                session = self._sessions.get(pid_sid)
+                if session and not session.summary:
+                    entry = find_index_entry(self._projects_dir, session.cwd, event.sid)
+                    if entry:
+                        session.summary = entry.summary
+                        session.first_prompt = entry.first_prompt
+                        if entry.git_branch:
+                            session.git_branch = entry.git_branch
+                        session.message_count = entry.message_count
+                return session
+
+        return None
+
     def apply_events(self, events: list[Event]) -> None:
         """Apply hook events to update session status."""
         for event in events:
-            session = self._sessions.get(event.sid)
+            session = self._resolve_session(event)
             if session is None:
                 continue
 

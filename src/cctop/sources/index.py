@@ -51,17 +51,6 @@ def find_index_entry(projects_dir: Path, cwd: Path, session_id: str) -> IndexEnt
     if transcript_path.is_file():
         return _read_transcript_metadata(session_id, transcript_path)
 
-    # Last resort: active sessions may have been resumed/forked, so the transcript
-    # lives under a different session ID. Find the most recently modified transcript.
-    if project_dir.is_dir():
-        transcripts = sorted(
-            project_dir.glob("*.jsonl"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        if transcripts:
-            return _read_transcript_metadata(session_id, transcripts[0])
-
     return None
 
 

@@ -16,8 +16,9 @@ Generate on-demand summaries via the Gemini API (gemini-2.0-flash-lite) when a s
 - While generating, the detail view shows "Summary: Generating..." with a dim style.
 
 ### Caching
-- Generated summaries are cached in memory on the `Session` object (`session.summary`).
-- Cache persists across refresh cycles (already handled by merger.py for summary/PR data).
+- Generated summaries are stored in a separate `llm_summary: str | None` field on the `Session` model, distinct from the index-derived `summary` field.
+- `merger.py` must be modified to carry `llm_summary` forward across refresh cycles (same pattern as `pr_url`/`pr_title`).
+- `SessionDetail` renders `llm_summary` when present, falling back to `summary` (index-derived), then `first_prompt`.
 - Cache is invalidated when the user explicitly requests regeneration via `s`.
 
 ### Fallback

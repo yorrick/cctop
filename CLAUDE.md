@@ -55,7 +55,13 @@ tail -f ~/.cctop/data/events.jsonl | python3 -c "import sys,json; [print(json.lo
 
 All issues are tracked in GitHub Issues (not Linear).
 
-## Workflow After Every Change
+## Workflow for Every Feature
+
+Every feature MUST follow this full workflow:
+
+1. **Brainstorm** — run `/brainstorming` to explore intent, requirements, and design
+2. **Plan & implement** — pass the brainstorming output to `/dev-loop:workflow` to generate and execute the implementation plan
+3. Features MUST be developed in a git worktree (use the `superpowers:using-git-worktrees` skill to set one up)
 
 After completing any code change, always follow these steps in order:
 

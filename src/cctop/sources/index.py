@@ -22,8 +22,11 @@ def encode_cwd(cwd: Path) -> str:
     """Encode a cwd path to the format used by Claude Code for project directories.
 
     /Users/foo/work -> -Users-foo-work
+    /tmp/my_project -> -tmp-my-project
+
+    Claude Code replaces both / and _ with - in project directory names.
     """
-    return str(cwd).replace("/", "-")
+    return str(cwd).replace("/", "-").replace("_", "-")
 
 
 def find_index_entry(projects_dir: Path, cwd: Path, session_id: str) -> IndexEntry | None:

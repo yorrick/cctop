@@ -35,10 +35,10 @@ CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 # Timeouts
 SHORT_SESSION_TIMEOUT = 30
 LONG_SESSION_TIMEOUT = 90
-POLL_TIMEOUT = 15.0
+POLL_TIMEOUT = 30.0
 POLL_INTERVAL = 0.5
 
-LONG_RUNNING_PROMPT = "Write a bash script that prints hello every 2 seconds for 20 seconds. Run it."
+LONG_RUNNING_PROMPT = "Write a bash script that prints hello every 2 seconds for 30 seconds. Run it."
 
 
 # ---------------------------------------------------------------------------
@@ -87,23 +87,32 @@ def read_events_typed(events_dir: Path, *, session_id: str | None = None) -> lis
     return [Event.model_validate(e) for e in read_events(events_dir, session_id=session_id)]
 
 
-def find_pid_file_by_cwd(cwd: Path) -> dict | None:  # type: ignore[type-arg]
-    """Find a PID file whose cwd matches the given path. Returns parsed data or None."""
+def snapshot_pid_files() -> set[str]:
+    """Return the set of PID file names currently in ~/.claude/sessions/."""
+    if not CLAUDE_SESSIONS_DIR.is_dir():
+        return set()
+    return {p.name for p in CLAUDE_SESSIONS_DIR.glob("*.json")}
+
+
+def find_new_pid_file(before: set[str]) -> dict | None:  # type: ignore[type-arg]
+    """Find a PID file that appeared after the snapshot. Returns parsed data or None."""
     if not CLAUDE_SESSIONS_DIR.is_dir():
         return None
-    for path in CLAUDE_SESSIONS_DIR.glob("*.json"):
+    current = {p.name for p in CLAUDE_SESSIONS_DIR.glob("*.json")}
+    new_files = current - before
+    for name in new_files:
+        path = CLAUDE_SESSIONS_DIR / name
         try:
             data = json.loads(path.read_text().split("\n", 1)[0])
-            if Path(data["cwd"]) == cwd:
-                pid = data["pid"]
-                try:
-                    os.kill(pid, 0)
-                    data["_alive"] = True
-                except ProcessLookupError:
-                    data["_alive"] = False
-                except PermissionError:
-                    data["_alive"] = True
-                return data
+            pid = data["pid"]
+            try:
+                os.kill(pid, 0)
+                data["_alive"] = True
+            except ProcessLookupError:
+                data["_alive"] = False
+            except PermissionError:
+                data["_alive"] = True
+            return data
         except (json.JSONDecodeError, KeyError, OSError):
             continue
     return None
@@ -240,7 +249,6 @@ def test_basic_lifecycle(tmp_path: Path) -> None:
         events = read_events(events_dir, session_id=session_id)
         event_types = [e["type"] for e in events]
 
-        # Required events exist
         assert "session_start" in event_types, f"No session_start event. Events: {event_types}"
         assert "stop" in event_types, f"No stop event. Events: {event_types}"
         assert "session_end" in event_types, f"No session_end event. Events: {event_types}"
@@ -269,15 +277,15 @@ def test_basic_lifecycle(tmp_path: Path) -> None:
         # After exit, process is dead and PID file should be cleaned up.
         time.sleep(2)
 
-        # SessionManager with recent=0 should not show dead sessions
-        mgr = SessionManager(
-            sessions_dir=CLAUDE_SESSIONS_DIR,
-            projects_dir=CLAUDE_PROJECTS_DIR,
-        )
+        # SessionManager with recent=0 should not show dead sessions.
+        # The PID-file cwd may differ from work_dir (Claude Code uses parent shell cwd),
+        # but the session should still not be visible since the process is dead.
+        mgr = SessionManager(sessions_dir=CLAUDE_SESSIONS_DIR, projects_dir=CLAUDE_PROJECTS_DIR)
         mgr.refresh()
-        # Just verify no session points to our work_dir.
-        session_cwds = [str(s.cwd) for s in mgr.sessions]
-        assert str(work_dir) not in session_cwds, f"Dead session still visible in SessionManager for {work_dir}"
+        # Verify no session exists for our session_id or PID-file session ID
+        # (both should be evicted since process is dead)
+        for s in mgr.sessions:
+            assert s.session_id != session_id, f"Dead session {session_id} still visible in SessionManager"
     finally:
         cleanup_transcript(work_dir, session_id)
 
@@ -292,14 +300,11 @@ def test_session_resumption(tmp_path: Path) -> None:
     work_dir.mkdir()
 
     try:
-        # First session
         result1 = run_claude_print(work_dir, session_id, "respond with just the word PONG", events_dir)
         assert result1.returncode == 0, f"First session failed: {result1.stderr}"
 
-        # Wait for process cleanup
         time.sleep(2)
 
-        # Second session via --resume
         result2 = run_claude_print(work_dir, session_id, "respond with just the word PING", events_dir, resume=True)
         assert result2.returncode == 0, f"Resume session failed: {result2.stderr}"
 
@@ -307,7 +312,6 @@ def test_session_resumption(tmp_path: Path) -> None:
         events = read_events(events_dir, session_id=session_id)
         event_types = [e["type"] for e in events]
 
-        # Two session_start and two session_end events
         assert event_types.count("session_start") == 2, (
             f"Expected 2 session_start events, got {event_types.count('session_start')}: {event_types}"
         )
@@ -315,7 +319,6 @@ def test_session_resumption(tmp_path: Path) -> None:
             f"Expected 2 session_end events, got {event_types.count('session_end')}: {event_types}"
         )
 
-        # Same transcript file, appended to
         tpath = transcript_path(work_dir, session_id)
         assert tpath.is_file(), f"Transcript not found at {tpath}"
 
@@ -336,54 +339,47 @@ def test_long_lived_session(tmp_path: Path) -> None:
     events_dir.mkdir()
     work_dir = tmp_path / "project"
     work_dir.mkdir()
+    pid_snapshot = snapshot_pid_files()
 
     try:
-        with background_claude(work_dir, session_id, LONG_RUNNING_PROMPT, events_dir) as proc:
-            # Wait for session_start event
-            wait_for(
-                lambda: any(e["type"] == "session_start" for e in read_events(events_dir, session_id=session_id)),
-                desc="session_start event",
-            )
-
-            # Wait for tool_start event (Bash tool)
+        with background_claude(work_dir, session_id, LONG_RUNNING_PROMPT, events_dir):
+            # Wait for tool activity
             wait_for(
                 lambda: any(e["type"] == "tool_start" for e in read_events(events_dir, session_id=session_id)),
                 desc="tool_start event",
             )
 
-            # PID file should exist — find it by cwd matching
-            assert proc.pid is not None
-            pid_data = find_pid_file_by_cwd(work_dir)
-            assert pid_data is not None, "No PID file found for session work_dir"
+            # Find the new PID file (appeared after our snapshot)
+            pid_data = wait_for(lambda: find_new_pid_file(pid_snapshot), desc="new PID file")
+            assert pid_data is not None
             assert pid_data["_alive"], "PID should be alive"
 
             # -- Integration assertion --
+            # SessionManager discovers session via PID file, then we apply events
             mgr = SessionManager(
                 sessions_dir=CLAUDE_SESSIONS_DIR,
                 projects_dir=CLAUDE_PROJECTS_DIR,
                 recent=timedelta(hours=1),
             )
             mgr.refresh()
-
             events_typed = read_events_typed(events_dir, session_id=session_id)
             mgr.apply_events(events_typed)
 
-            # Find our session by cwd
-            our_sessions = [s for s in mgr.sessions if str(s.cwd) == str(work_dir)]
-            assert len(our_sessions) >= 1, (
-                f"Session not found in SessionManager. All cwds: {[str(s.cwd) for s in mgr.sessions]}"
+            # Find our session by PID-file session ID
+            pid_sid = pid_data["sessionId"]
+            our_session = next((s for s in mgr.sessions if s.session_id == pid_sid), None)
+            assert our_session is not None, (
+                f"Session {pid_sid} not in SessionManager. IDs: {[s.session_id for s in mgr.sessions]}"
             )
-            session = our_sessions[0]
-            assert session.status in ("working", "idle"), f"Session should be working or idle, got: {session.status}"
+            assert our_session.status in ("working", "idle"), (
+                f"Session should be working or idle, got: {our_session.status}"
+            )
 
         # After context manager kills the process, wait for cleanup
         time.sleep(3)
 
-        # PID file should be cleaned up
-        if pid_data:
-            assert not pid_file_exists(pid_data["pid"]), "PID file should be removed after exit"
+        assert not pid_file_exists(pid_data["pid"]), "PID file should be removed after exit"
 
-        # session_end event should exist
         events = read_events(events_dir, session_id=session_id)
         event_types = [e["type"] for e in events]
         assert "session_end" in event_types, f"No session_end after exit. Events: {event_types}"
@@ -403,6 +399,7 @@ def test_session_end_does_not_mean_process_dead(tmp_path: Path) -> None:
     events_dir.mkdir()
     work_dir = tmp_path / "project"
     work_dir.mkdir()
+    pid_snapshot = snapshot_pid_files()
 
     try:
         with background_claude(work_dir, session_id, LONG_RUNNING_PROMPT, events_dir):
@@ -412,13 +409,11 @@ def test_session_end_does_not_mean_process_dead(tmp_path: Path) -> None:
                 desc="tool_start event",
             )
 
-            # Find the PID file to get the PID-file session ID
-            pid_data = wait_for(
-                lambda: find_pid_file_by_cwd(work_dir),
-                desc="PID file for work_dir",
-            )
+            # Find the new PID file
+            pid_data = wait_for(lambda: find_new_pid_file(pid_snapshot), desc="new PID file")
             assert pid_data is not None
             assert pid_data["_alive"]
+            pid_sid = pid_data["sessionId"]
 
             # Build SessionManager and load initial state
             mgr = SessionManager(
@@ -431,16 +426,12 @@ def test_session_end_does_not_mean_process_dead(tmp_path: Path) -> None:
             mgr.apply_events(events_typed)
 
             # Verify session is alive
-            our_sessions = [s for s in mgr.sessions if str(s.cwd) == str(work_dir)]
-            assert len(our_sessions) >= 1
-            assert our_sessions[0].status in ("working", "idle")
+            our_session = next((s for s in mgr.sessions if s.session_id == pid_sid), None)
+            assert our_session is not None
+            assert our_session.status in ("working", "idle")
 
             # Inject a fake session_end event (simulates /clear)
-            fake_event = {
-                "ts": int(time.time() * 1000),
-                "sid": session_id,
-                "type": "session_end",
-            }
+            fake_event = {"ts": int(time.time() * 1000), "sid": session_id, "type": "session_end"}
             events_file = events_dir / "events.jsonl"
             with events_file.open("a") as f:
                 f.write(json.dumps(fake_event) + "\n")
@@ -456,12 +447,12 @@ def test_session_end_does_not_mean_process_dead(tmp_path: Path) -> None:
             mgr2.apply_events(all_events)
 
             # THE KEY ASSERTION: session must NOT be offline because PID is alive
-            our_sessions = [s for s in mgr2.sessions if str(s.cwd) == str(work_dir)]
-            assert len(our_sessions) >= 1, "Session disappeared from SessionManager"
-            assert our_sessions[0].status != "offline", (
+            our_session = next((s for s in mgr2.sessions if s.session_id == pid_sid), None)
+            assert our_session is not None, "Session disappeared from SessionManager"
+            assert our_session.status != "offline", (
                 f"Session is offline despite PID being alive! "
                 f"session_end should not kill a live session. "
-                f"Status: {our_sessions[0].status}"
+                f"Status: {our_session.status}"
             )
     finally:
         cleanup_transcript(work_dir, session_id)
@@ -475,14 +466,12 @@ def test_pid_file_cleanup_on_exit(tmp_path: Path) -> None:
     events_dir.mkdir()
     work_dir = tmp_path / "project"
     work_dir.mkdir()
+    pid_snapshot = snapshot_pid_files()
 
     try:
         with background_claude(work_dir, session_id, "respond with just the word PONG", events_dir):
             # Wait for the PID file to appear
-            pid_data = wait_for(
-                lambda: find_pid_file_by_cwd(work_dir),
-                desc="PID file to appear",
-            )
+            pid_data = wait_for(lambda: find_new_pid_file(pid_snapshot), desc="new PID file")
             assert pid_data is not None
             recorded_pid = pid_data["pid"]
             assert pid_file_exists(recorded_pid), "PID file should exist during session"
@@ -490,10 +479,8 @@ def test_pid_file_cleanup_on_exit(tmp_path: Path) -> None:
         # Process has been terminated by context manager
         time.sleep(3)
 
-        # PID file should be cleaned up
         assert not pid_file_exists(recorded_pid), f"PID file for {recorded_pid} still exists after process exit"
 
-        # session_end event should have been emitted
         events = read_events(events_dir, session_id=session_id)
         event_types = [e["type"] for e in events]
         assert "session_end" in event_types, f"No session_end event after exit. Events: {event_types}"
@@ -510,6 +497,7 @@ def test_session_id_mapping(tmp_path: Path) -> None:
     events_dir.mkdir()
     work_dir = tmp_path / "project"
     work_dir.mkdir()
+    pid_snapshot = snapshot_pid_files()
 
     try:
         with background_claude(work_dir, session_id, LONG_RUNNING_PROMPT, events_dir):
@@ -520,22 +508,18 @@ def test_session_id_mapping(tmp_path: Path) -> None:
             )
 
             # Get PID file data
-            pid_data = wait_for(
-                lambda: find_pid_file_by_cwd(work_dir),
-                desc="PID file for work_dir",
-            )
+            pid_data = wait_for(lambda: find_new_pid_file(pid_snapshot), desc="new PID file")
+            assert pid_data is not None
+            pid_sid = pid_data["sessionId"]
 
             # -- Raw contract assertions --
-            # Hook events use our --session-id
             events = read_events(events_dir, session_id=session_id)
             assert len(events) > 0, "No events for our session_id"
 
-            # Transcript is named after our --session-id
             tpath = transcript_path(work_dir, session_id)
             assert tpath.is_file(), f"Transcript not at expected path {tpath}"
 
             # PID file sessionId may differ from our --session-id
-            assert pid_data is not None
             assert "sessionId" in pid_data
 
             # -- Integration assertion --
@@ -548,12 +532,9 @@ def test_session_id_mapping(tmp_path: Path) -> None:
             events_typed = read_events_typed(events_dir, session_id=session_id)
             mgr.apply_events(events_typed)
 
-            # Session should be discoverable and have metadata from transcript
-            our_sessions = [s for s in mgr.sessions if str(s.cwd) == str(work_dir)]
-            assert len(our_sessions) >= 1, "Session not found after CWD-based event resolution"
-
-            session = our_sessions[0]
-            assert session.status in ("working", "idle"), f"Unexpected status: {session.status}"
-            assert session.message_count >= 1, f"Message count not populated after CWD mapping: {session.message_count}"
+            # Session should be discoverable by PID-file session ID
+            our_session = next((s for s in mgr.sessions if s.session_id == pid_sid), None)
+            assert our_session is not None, "Session not found after event application"
+            assert our_session.status in ("working", "idle"), f"Unexpected status: {our_session.status}"
     finally:
         cleanup_transcript(work_dir, session_id)

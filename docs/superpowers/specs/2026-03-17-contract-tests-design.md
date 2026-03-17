@@ -119,12 +119,12 @@ Starts `claude --print` in a background subprocess. Yields the `Popen` object. O
 **Raw contract assertions:**
 - Two `session_start` events with `sid=<uuid>`
 - Two `session_end` events with `sid=<uuid>`
-- Same transcript file appended to (not a new file created)
+- Same transcript file appended to (not a new file created) — `--resume` without `--fork-session` reuses the session ID
 - Transcript contains 4 messages (2 user + 2 assistant)
 
 ### Test 3: `test_long_lived_session`
 
-**Setup:** `claude --print --session-id <uuid> --dangerously-skip-permissions "Write a bash script that prints hello every 2 seconds for 20 seconds. Run it."` as background subprocess.
+**Setup:** `claude --print --session-id <uuid> --dangerously-skip-permissions "Write a bash script that prints hello every 2 seconds for 20 seconds. Run it."` as background subprocess. The exact runtime is not critical — only that it runs long enough for mid-session polling (~15s).
 
 **While running (poll for conditions):**
 - PID file exists in `~/.claude/sessions/`

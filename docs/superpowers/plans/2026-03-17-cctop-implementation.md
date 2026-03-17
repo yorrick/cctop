@@ -14,6 +14,8 @@
 
 ## File Structure
 
+**Note:** The spec uses a flat `cctop/` layout. This plan uses `src/cctop/` (src layout) which is standard for uv projects with `--lib`.
+
 ```
 pyproject.toml                    # uv project config, dependencies, entry point
 src/cctop/__init__.py             # Package init
@@ -42,8 +44,10 @@ tests/test_duration.py
 tests/test_sources_sessions.py
 tests/test_sources_index.py
 tests/test_sources_events.py
+tests/test_sources_github.py
 tests/test_sources_merger.py
 tests/test_hooks_install.py
+tests/test_events_cleanup.py
 tests/test_app.py                 # Textual app snapshot/pilot tests
 ```
 
@@ -914,9 +918,92 @@ git commit -m "feat: add events.jsonl tailer"
 
 **Files:**
 - Create: `src/cctop/sources/github.py`
-- Create: `tests/test_sources_github.py` (skip for now — requires mocking subprocess, low value)
+- Create: `tests/test_sources_github.py`
 
-- [ ] **Step 1: Implement GitHub PR lookup**
+- [ ] **Step 1: Write failing tests**
+
+`tests/test_sources_github.py`:
+```python
+import asyncio
+import json
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from cctop.sources.github import PRInfo, clear_cache, lookup_pr
+
+
+@pytest.fixture(autouse=True)
+def _clear_pr_cache() -> None:
+    clear_cache()
+
+
+@pytest.mark.asyncio
+async def test_lookup_pr_success() -> None:
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (json.dumps([{"url": "https://github.com/org/repo/pull/42", "title": "Fix bug"}]).encode(), b"")
+    mock_proc.returncode = 0
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+        result = await lookup_pr("feat/fix-bug", "/tmp")
+
+    assert result is not None
+    assert result.url == "https://github.com/org/repo/pull/42"
+    assert result.title == "Fix bug"
+
+
+@pytest.mark.asyncio
+async def test_lookup_pr_no_prs() -> None:
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (b"[]", b"")
+    mock_proc.returncode = 0
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+        result = await lookup_pr("no-pr-branch", "/tmp")
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_lookup_pr_gh_not_found() -> None:
+    with patch("asyncio.create_subprocess_exec", side_effect=FileNotFoundError):
+        result = await lookup_pr("any-branch", "/tmp")
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_lookup_pr_cache_hit() -> None:
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (json.dumps([{"url": "https://example.com/pr/1", "title": "PR"}]).encode(), b"")
+    mock_proc.returncode = 0
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        await lookup_pr("cached-branch", "/tmp")
+        await lookup_pr("cached-branch", "/tmp")
+
+    # Should only call gh once due to caching
+    assert mock_exec.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_lookup_pr_gh_error_returns_none() -> None:
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (b"", b"error")
+    mock_proc.returncode = 1
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+        result = await lookup_pr("error-branch", "/tmp")
+
+    assert result is None
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/test_sources_github.py -v`
+Expected: FAIL — `ModuleNotFoundError`
+
+- [ ] **Step 3: Implement GitHub PR lookup**
 
 `src/cctop/sources/github.py`:
 ```python
@@ -974,10 +1061,15 @@ def clear_cache() -> None:
     _cache.clear()
 ```
 
-- [ ] **Step 2: Commit**
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/test_sources_github.py -v`
+Expected: All 5 PASS.
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/cctop/sources/github.py
+git add src/cctop/sources/github.py tests/test_sources_github.py
 git commit -m "feat: add async GitHub PR lookup with caching"
 ```
 
@@ -995,7 +1087,7 @@ git commit -m "feat: add async GitHub PR lookup with caching"
 ```python
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cctop.models import Event
@@ -1065,6 +1157,26 @@ def test_merge_applies_tool_events(tmp_path: Path) -> None:
 
     assert mgr.sessions[0].status == "working"
     assert mgr.sessions[0].current_tool == "Bash"
+
+
+def test_merge_recent_zero_evicts_offline(tmp_path: Path) -> None:
+    """With --recent 0 (default), dead PID sessions should not appear."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    _write_session_file(sessions_dir, 99999999, "dead-session", "/tmp/test")
+
+    mgr = SessionManager(
+        sessions_dir=sessions_dir,
+        projects_dir=projects_dir,
+        recent=timedelta(0),  # live sessions only
+    )
+    mgr.refresh()
+
+    # Offline session should be evicted with recent=0
+    assert len(mgr.sessions) == 0
 
 
 def test_merge_enriches_from_index(tmp_path: Path) -> None:
@@ -1185,6 +1297,11 @@ class SessionManager:
                     last_activity=last_activity,
                     ended_at=ended_at,
                 )
+
+            # Evict offline sessions when recent=0 (live only)
+            if session.status == "offline" and self._recent == timedelta(0):
+                self._sessions.pop(raw.session_id, None)
+                continue
 
             # Enrich from sessions-index.json
             entry = find_index_entry(self._projects_dir, raw.cwd, raw.session_id)
@@ -1920,9 +2037,11 @@ class CctopApp(App):
         Binding("q", "quit", "Quit"),
         Binding("f10", "quit", "Quit", show=False),
         Binding("f6", "cycle_sort", "Sort"),
-        Binding("greater_than_sign", "cycle_sort", "Sort", show=False),
-        Binding("less_than_sign", "cycle_sort_reverse", "Sort reverse", show=False),
-        Binding("question_mark", "help", "Help", show=False),
+        Binding("greater_than", "cycle_sort", "Sort", show=False),
+        Binding("less_than", "cycle_sort_reverse", "Sort reverse", show=False),
+        Binding("slash", "toggle_filter", "Filter"),
+        Binding("question_mark", "show_help", "Help"),
+        Binding("h", "show_help", "Help", show=False),
     ]
 
     def __init__(self, recent: timedelta = timedelta(0), **kwargs) -> None:
@@ -1950,11 +2069,19 @@ class CctopApp(App):
             self._manager.apply_events(events)
         self._update_ui()
 
-    def _poll_slow(self) -> None:
+    async def _poll_slow(self) -> None:
         """Slow polling: sessions-index refresh, PR lookups."""
         # Index data is refreshed in manager.refresh() already
-        # PR lookups will be added later as async background tasks
-        pass
+        # PR lookups for sessions with a branch but no cached PR
+        from cctop.sources.github import lookup_pr
+
+        for session in self._manager.sessions:
+            if session.git_branch and not session.pr_url:
+                info = await lookup_pr(session.git_branch, str(session.cwd))
+                if info:
+                    session.pr_url = info.url
+                    session.pr_title = info.title
+        self._update_ui()
 
     def _sort_sessions(self, sessions: list[Session]) -> list[Session]:
         key_name, reverse = SORT_KEYS[self._sort_index % len(SORT_KEYS)]
@@ -1977,6 +2104,23 @@ class CctopApp(App):
     def action_cycle_sort_reverse(self) -> None:
         self._sort_index = (self._sort_index - 1) % len(SORT_KEYS)
         self._update_ui()
+
+    def action_toggle_filter(self) -> None:
+        """Toggle filter input. Simple substring filter on project name."""
+        self.notify("Filter: not yet implemented (planned for v0.2)", severity="information", timeout=3)
+
+    def action_show_help(self) -> None:
+        """Show help screen with keybindings."""
+        help_text = (
+            "cctop — Claude Code session monitor\n\n"
+            "↑/↓ or k/j   Navigate sessions\n"
+            "Enter         Expand / collapse\n"
+            "F6 or >/<     Cycle sort mode\n"
+            "/             Filter (coming soon)\n"
+            "?/h           This help\n"
+            "q / F10       Quit"
+        )
+        self.notify(help_text, severity="information", timeout=15)
 ```
 
 - [ ] **Step 4: Wire app into CLI**
@@ -2135,6 +2279,92 @@ git commit -m "test: add Textual app integration tests"
 **Files:**
 - Modify: `src/cctop/sources/events.py`
 - Modify: `src/cctop/app.py`
+- Create: `tests/test_events_cleanup.py`
+
+- [ ] **Step 0: Write tests for events cleanup**
+
+`tests/test_events_cleanup.py`:
+```python
+import json
+import time
+from pathlib import Path
+
+from cctop.sources.events import EventsTailer, MAX_EVENTS_FILE_SIZE
+
+
+def _write_event(f, ts: int, sid: str = "abc") -> None:
+    f.write(json.dumps({"ts": ts, "sid": sid, "type": "stop"}) + "\n")
+
+
+def test_cleanup_skips_small_file(tmp_path: Path) -> None:
+    events_file = tmp_path / "events.jsonl"
+    events_file.write_text(json.dumps({"ts": 1000, "sid": "abc", "type": "stop"}) + "\n")
+
+    tailer = EventsTailer(events_file)
+    tailer.cleanup_if_needed()
+
+    # File should be untouched
+    assert events_file.read_text().strip() != ""
+
+
+def test_cleanup_removes_old_events(tmp_path: Path) -> None:
+    events_file = tmp_path / "events.jsonl"
+
+    now_ms = int(time.time() * 1000)
+    old_ts = now_ms - (25 * 3600 * 1000)  # 25 hours ago
+    recent_ts = now_ms - (1 * 3600 * 1000)  # 1 hour ago
+
+    # Write enough data to exceed 10 MB
+    with events_file.open("w") as f:
+        # Write old events to bulk up the file
+        line = json.dumps({"ts": old_ts, "sid": "old", "type": "stop", "padding": "x" * 500}) + "\n"
+        lines_needed = (MAX_EVENTS_FILE_SIZE // len(line)) + 100
+        for _ in range(lines_needed):
+            f.write(line)
+        # Write one recent event
+        f.write(json.dumps({"ts": recent_ts, "sid": "recent", "type": "stop"}) + "\n")
+
+    assert events_file.stat().st_size > MAX_EVENTS_FILE_SIZE
+
+    tailer = EventsTailer(events_file)
+    tailer.cleanup_if_needed()
+
+    # Should only keep the recent event
+    remaining = events_file.read_text().strip().split("\n")
+    assert len(remaining) == 1
+    assert json.loads(remaining[0])["sid"] == "recent"
+
+
+def test_cleanup_resets_offset(tmp_path: Path) -> None:
+    events_file = tmp_path / "events.jsonl"
+    events_file.write_text(json.dumps({"ts": 1000, "sid": "abc", "type": "stop"}) + "\n")
+
+    tailer = EventsTailer(events_file)
+    tailer.read_new()  # Advances offset
+    assert tailer._offset > 0
+
+    # Force cleanup by writing a huge file
+    now_ms = int(time.time() * 1000)
+    with events_file.open("w") as f:
+        line = json.dumps({"ts": now_ms - (25 * 3600 * 1000), "sid": "old", "type": "stop", "padding": "x" * 500}) + "\n"
+        for _ in range((MAX_EVENTS_FILE_SIZE // len(line)) + 100):
+            f.write(line)
+
+    tailer.cleanup_if_needed()
+    assert tailer._offset == 0
+
+
+def test_hooks_installed_false(tmp_path: Path) -> None:
+    tailer = EventsTailer(tmp_path / "nonexistent" / "events.jsonl")
+    assert tailer.hooks_installed is False
+
+
+def test_hooks_installed_true(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    tailer = EventsTailer(data_dir / "events.jsonl")
+    assert tailer.hooks_installed is True
+```
 
 - [ ] **Step 1: Add events file cleanup to EventsTailer**
 
@@ -2243,7 +2473,7 @@ Expected: All pass.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/cctop/sources/events.py src/cctop/app.py
+git add src/cctop/sources/events.py src/cctop/app.py tests/test_events_cleanup.py
 git commit -m "feat: add events file cleanup and hooks warning banner"
 ```
 

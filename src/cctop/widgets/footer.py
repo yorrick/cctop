@@ -11,6 +11,7 @@ class Footer(Static):
             ("↑↓", "navigate"),
             ("Enter", "expand/collapse"),
             ("c", "copy ID"),
+            ("r", "refresh summary"),
             ("F6", "sort"),
             ("/", "filter"),
             ("?", "help"),

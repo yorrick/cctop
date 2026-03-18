@@ -133,6 +133,7 @@ class CctopApp(App):
             "cctop — Claude Code session monitor\n\n"
             "↑/↓ or k/j   Navigate sessions\n"
             "Enter         Expand / collapse\n"
+            "c             Copy session ID\n"
             "F6 or >/<     Cycle sort mode\n"
             "/             Filter (coming soon)\n"
             "?/h           This help\n"

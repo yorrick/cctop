@@ -10,6 +10,7 @@ class Footer(Static):
         shortcuts = [
             ("↑↓", "navigate"),
             ("Enter", "expand/collapse"),
+            ("c", "copy ID"),
             ("F6", "sort"),
             ("/", "filter"),
             ("?", "help"),

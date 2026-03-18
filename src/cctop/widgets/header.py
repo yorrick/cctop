@@ -49,8 +49,8 @@ class Header(Static):
         # Column headers
         line.append("\n")
         line.append("     ", style="dim")
-        line.append(f"{'NAME':<16}", style="dim bold")
         line.append(f"{'PROJECT':<24}", style="dim bold")
+        line.append(f"{'NAME':<16}", style="dim bold")
         line.append(f"{'BRANCH':<22}", style="dim bold")
         line.append(f"{'STATUS':<20}", style="dim bold")
         line.append(f"{'MSGS':>4}", style="dim bold")

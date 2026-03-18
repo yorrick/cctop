@@ -20,6 +20,11 @@ def test_encode_cwd_trailing_slash() -> None:
     assert encode_cwd(Path("/Users/foo/work/")) == "-Users-foo-work"
 
 
+def test_encode_cwd_dotfile_directory() -> None:
+    """Dotfile directories like .worktrees should have the dot replaced with -."""
+    assert encode_cwd(Path("/Users/foo/work/cctop/.worktrees/backlog")) == "-Users-foo-work-cctop--worktrees-backlog"
+
+
 def test_find_index_entry_found(tmp_path: Path) -> None:
     projects_dir = tmp_path / "-tmp-test"
     projects_dir.mkdir()

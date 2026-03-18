@@ -1,6 +1,6 @@
 [project]
 name = "claude-cctop"
-version = "0.1.0"
+version = "0.2.0"
 description = "A htop-like TUI for monitoring Claude Code sessions in real-time"
 readme = "README.md"
 license = "MIT"
@@ -25,15 +25,14 @@ dependencies = [
     "pydantic>=2.0",
     "loguru",
     "claude-agent-sdk>=0.1.49",
+    "iterm2",
+    "psutil>=5.0",
 ]
 
 [project.urls]
 Homepage = "https://github.com/yorrick/cctop"
 Repository = "https://github.com/yorrick/cctop"
 Issues = "https://github.com/yorrick/cctop/issues"
-
-[project.optional-dependencies]
-iterm2 = ["iterm2", "psutil>=5.0"]
 
 [project.scripts]
 cctop = "cctop.cli:app"

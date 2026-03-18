@@ -250,20 +250,16 @@ wheels = [
 
 [[package]]
 name = "claude-cctop"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "claude-agent-sdk" },
+    { name = "iterm2" },
     { name = "loguru" },
+    { name = "psutil" },
     { name = "pydantic" },
     { name = "textual" },
     { name = "typer" },
-]
-
-[package.optional-dependencies]
-iterm2 = [
-    { name = "iterm2" },
-    { name = "psutil" },
 ]
 
 [package.dev-dependencies]
@@ -279,9 +275,9 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "claude-agent-sdk", specifier = ">=0.1.49" },
-    { name = "iterm2", marker = "extra == 'iterm2'" },
+    { name = "iterm2" },
     { name = "loguru" },
-    { name = "psutil", marker = "extra == 'iterm2'", specifier = ">=5.0" },
+    { name = "psutil", specifier = ">=5.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "textual", specifier = ">=3.0" },
     { name = "typer", specifier = ">=0.15" },

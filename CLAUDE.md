@@ -71,6 +71,16 @@ tail -f ~/.cctop/data/events.jsonl | python3 -c "import sys,json; [print(json.lo
 # Run the thing you want to test, then inspect what changed
 ```
 
+## Versioning
+
+This project uses **semantic versioning** (semver). The version is in `pyproject.toml`.
+
+- **Patch** (0.1.x): bug fixes, minor internal changes
+- **Minor** (0.x.0): new features, non-breaking changes
+- **Major** (x.0.0): breaking changes
+
+**Always bump the version** when making changes that will be published to PyPI. Do not forget this step — an unchanged version means `uvx` users get a stale release.
+
 ## Issue Tracking
 
 All issues are tracked in GitHub Issues (not Linear).

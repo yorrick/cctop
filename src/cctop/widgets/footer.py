@@ -9,7 +9,8 @@ class Footer(Static):
         line = Text()
         shortcuts = [
             ("↑↓", "navigate"),
-            ("Enter", "expand/collapse"),
+            ("Space", "expand/collapse"),
+            ("Enter", "focus pane"),
             ("c", "copy ID"),
             ("r", "refresh summary"),
             ("F6", "sort"),

@@ -21,7 +21,8 @@ class SessionList(VerticalScroll):
         Binding("j", "cursor_down", "Down", show=False),
         Binding("up", "cursor_up", "Up"),
         Binding("down", "cursor_down", "Down"),
-        Binding("enter", "toggle_expand", "Expand/Collapse"),
+        Binding("space", "toggle_expand", "Expand/Collapse"),
+        Binding("enter", "focus_iterm", "Focus pane"),
         Binding("r", "regenerate_summary", "Regenerate summary"),
         Binding("c", "copy_session_id", "Copy session ID"),
     ]
@@ -75,6 +76,17 @@ class SessionList(VerticalScroll):
                 self._start_summary_generation(session)
             else:
                 self._rebuild()
+
+    async def action_focus_iterm(self) -> None:
+        """Focus the iTerm2 pane running the selected session."""
+        if not self._sessions:
+            return
+        if not self.app._iterm_bridge.available:  # type: ignore[attr-defined]
+            return
+        session = self._sessions[self._cursor]
+        focused = await self.app._iterm_bridge.activate_session(session.pid)  # type: ignore[attr-defined]
+        if not focused:
+            self.app.notify("No iTerm2 pane found for this session")
 
     def action_regenerate_summary(self) -> None:
         """Regenerate the LLM summary for the currently expanded session."""

@@ -267,3 +267,114 @@ def test_pr_data_survives_refresh(tmp_path: Path) -> None:
 
     assert mgr.sessions[0].pr_url == "https://github.com/org/repo/pull/42"
     assert mgr.sessions[0].pr_title == "feat: cool feature"
+
+
+def test_cwd_collision_does_not_cross_pollinate_events(tmp_path: Path) -> None:
+    """When two alive sessions share a CWD, events must not be applied to the wrong one."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    # Two sessions in the same CWD
+    _write_session_file(sessions_dir, os.getpid(), "session-A", "/tmp/shared")
+    # Use a different alive PID (the test runner's parent)
+    ppid = os.getppid()
+    _write_session_file(sessions_dir, ppid, "session-B", "/tmp/shared")
+
+    mgr = SessionManager(sessions_dir=sessions_dir, projects_dir=projects_dir)
+    mgr.refresh()
+
+    assert len(mgr.sessions) == 2
+    # Both should be idle
+    for s in mgr.sessions:
+        assert s.status == "idle"
+
+    # Event with an unknown SID and the shared CWD — should NOT resolve
+    # to either session because the CWD is ambiguous.
+    mgr.apply_events([Event(ts=1000, sid="unknown-hook-sid", type="tool_start", tool="Bash", cwd="/tmp/shared")])
+
+    # Neither session should have been affected
+    for s in mgr.sessions:
+        assert s.status == "idle", f"Session {s.session_id} should be idle but is {s.status}"
+        assert s.current_tool is None
+
+
+def test_single_session_cwd_mapping_still_works(tmp_path: Path) -> None:
+    """CWD-based mapping should still work when only one session uses a CWD."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    _write_session_file(sessions_dir, os.getpid(), "session-A", "/tmp/unique")
+
+    mgr = SessionManager(sessions_dir=sessions_dir, projects_dir=projects_dir)
+    mgr.refresh()
+
+    # Event with unknown SID but matching CWD — should resolve to the session
+    mgr.apply_events([Event(ts=1000, sid="different-hook-sid", type="tool_start", tool="Read", cwd="/tmp/unique")])
+
+    session = mgr.sessions[0]
+    assert session.status == "working"
+    assert session.current_tool == "Read"
+
+
+def test_session_start_with_transcript_path_enriches_name(tmp_path: Path) -> None:
+    """session_start event with transcript_path reads name from transcript."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    _write_session_file(sessions_dir, os.getpid(), "pid-sid", "/tmp/test")
+
+    # Create a transcript at an arbitrary path with a custom-title
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "custom-title", "customTitle": "my-feature", "sessionId": "pid-sid"})
+        + "\n"
+        + json.dumps({"type": "user", "message": {"content": "hello"}})
+        + "\n"
+    )
+
+    mgr = SessionManager(sessions_dir=sessions_dir, projects_dir=projects_dir)
+    mgr.refresh()
+
+    assert mgr.sessions[0].name is None  # No transcript match by session ID
+
+    # session_start event carries transcript_path — should enrich name
+    mgr.apply_events(
+        [
+            Event(
+                ts=1000,
+                sid="pid-sid",
+                type="session_start",
+                cwd="/tmp/test",
+                transcript_path=str(transcript),
+            ),
+        ]
+    )
+
+    assert mgr.sessions[0].name == "my-feature"
+
+
+def test_session_start_without_transcript_path_no_crash(tmp_path: Path) -> None:
+    """session_start without transcript_path still works normally."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    _write_session_file(sessions_dir, os.getpid(), "abc-123", "/tmp/test")
+
+    mgr = SessionManager(sessions_dir=sessions_dir, projects_dir=projects_dir)
+    mgr.refresh()
+
+    mgr.apply_events(
+        [
+            Event(ts=1000, sid="abc-123", type="session_start", cwd="/tmp/test"),
+        ]
+    )
+
+    assert mgr.sessions[0].name is None

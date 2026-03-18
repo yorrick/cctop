@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cctop.models import Event, Session
-from cctop.sources.index import IndexEntry, _read_transcript_metadata, encode_cwd, find_index_entry
+from cctop.sources.index import _read_transcript_metadata, find_index_entry
 from cctop.sources.sessions import discover_sessions
 
 # Grace period before a session transitions from "working" to "idle".
@@ -31,8 +31,9 @@ class SessionManager:
         self._hook_sid_to_pid_sid: dict[str, str] = {}
         # Reverse mapping: PID-file session ID -> hook/transcript session ID
         self._pid_sid_to_hook_sid: dict[str, str] = {}
-        # Maps cwd -> PID-file session ID for reverse lookup
-        self._cwd_to_pid_sid: dict[str, str] = {}
+        # Maps cwd -> PID-file session ID for reverse lookup.
+        # None means the CWD is shared by multiple alive sessions (ambiguous).
+        self._cwd_to_pid_sid: dict[str, str | None] = {}
         # Sessions that received a Stop event (Claude finished its turn).
         # Only these are candidates for idle transition after grace period.
         # Sessions with only tool_end events stay "working" (Claude is still thinking).
@@ -56,6 +57,9 @@ class SessionManager:
         raw_sessions = discover_sessions(self._sessions_dir)
         now = datetime.now(tz=timezone.utc)
 
+        # Rebuild CWD map fresh each cycle so it correctly reflects which
+        # CWDs are ambiguous (shared by multiple alive sessions).
+        self._cwd_to_pid_sid.clear()
         seen_ids: set[str] = set()
         for raw in raw_sessions:
             seen_ids.add(raw.session_id)
@@ -110,16 +114,6 @@ class SessionManager:
                 hook_sid = self._pid_sid_to_hook_sid.get(raw.session_id)
                 if hook_sid:
                     entry = find_index_entry(self._projects_dir, raw.cwd, hook_sid)
-            if not entry:
-                # Try 2: find the active transcript by looking for the most recently
-                # modified .jsonl in the project dir that was written to after this
-                # session started. This handles pre-hook sessions safely.
-                entry = _find_active_transcript_entry(
-                    self._projects_dir,
-                    raw.cwd,
-                    raw.session_id,
-                    raw.started_at,
-                )
             if entry:
                 session.summary = entry.summary
                 session.first_prompt = entry.first_prompt
@@ -133,7 +127,15 @@ class SessionManager:
                 session.git_branch = _detect_git_branch(raw.cwd)
 
             self._sessions[raw.session_id] = session
-            self._cwd_to_pid_sid[str(raw.cwd)] = raw.session_id
+            # Only alive sessions participate in CWD-based event mapping.
+            if raw.is_alive:
+                cwd_key = str(raw.cwd)
+                if cwd_key in self._cwd_to_pid_sid and self._cwd_to_pid_sid[cwd_key] != raw.session_id:
+                    # Multiple alive sessions share this CWD — CWD-based mapping
+                    # is ambiguous, so disable it by setting to None.
+                    self._cwd_to_pid_sid[cwd_key] = None  # type: ignore[assignment]
+                else:
+                    self._cwd_to_pid_sid[cwd_key] = raw.session_id
 
         # Apply idle grace period: only transition to idle if Claude has finished
         # its turn (Stop event received) AND the grace period has elapsed.
@@ -256,49 +258,24 @@ class SessionManager:
                 case "session_start":
                     session.last_activity = now_ts
                     self._stopped_sessions.discard(session.session_id)
-
-
-def _find_active_transcript_entry(
-    projects_dir: Path,
-    cwd: Path,
-    session_id: str,
-    started_at: datetime,
-) -> IndexEntry | None:
-    """Find the active transcript for a session by looking at recently modified files.
-
-    When Claude resumes a session, the PID file gets a new session ID but the transcript
-    stays under the original ID. We find it by looking for .jsonl files in the project
-    directory that were modified after this session started.
-
-    Safety: only returns a match if the most recent transcript was modified within
-    5 minutes of the session start or later.
-    """
-    encoded = encode_cwd(cwd)
-    project_dir = projects_dir / encoded
-
-    if not project_dir.is_dir():
-        return None
-
-    # Find transcripts modified after this session started
-    started_ts = started_at.timestamp()
-    candidates: list[Path] = []
-    for t in project_dir.glob("*.jsonl"):
-        if t.stat().st_mtime >= started_ts - 300:  # 5 minute buffer before start
-            candidates.append(t)
-
-    if not candidates:
-        return None
-
-    # Pick the most recently modified one
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    best = candidates[0]
-
-    # Don't use this transcript if its session ID matches the PID-file session ID
-    # (that case is already handled by the direct lookup)
-    if best.stem == session_id:
-        return None
-
-    return _read_transcript_metadata(session_id, best)
+                    # Use transcript_path (if provided) to enrich session
+                    # metadata. This handles the common case where the
+                    # PID-file session ID differs from the transcript ID.
+                    if event.transcript_path and not session.name:
+                        tp = Path(event.transcript_path)
+                        if tp.is_file():
+                            entry = _read_transcript_metadata(event.sid, tp)
+                            if entry:
+                                if entry.name:
+                                    session.name = entry.name
+                                if entry.summary:
+                                    session.summary = entry.summary
+                                if entry.first_prompt:
+                                    session.first_prompt = entry.first_prompt
+                                if entry.git_branch:
+                                    session.git_branch = entry.git_branch
+                                if entry.message_count:
+                                    session.message_count = entry.message_count
 
 
 _git_branch_cache: dict[str, str | None] = {}

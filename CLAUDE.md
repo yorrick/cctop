@@ -40,6 +40,8 @@ Validated facts (do not re-investigate unless behavior seems to have changed):
 - `claude --print "..."` DOES fire hook events: `session_start`, `stop`, `session_end` (with a new session ID and the cwd of the process that spawned it)
 - These events can be mistakenly resolved to a real session via CWD-based mapping if not guarded
 
+**NEVER use recency-based (most recently modified file) fallbacks** for transcript/session ID resolution. When multiple sessions share a project directory, the most recently modified transcript belongs to a *different* session, causing cross-contamination (e.g. session "features" getting the name "backlog"). Only use exact session ID matches.
+
 To validate new assumptions about `claude` CLI behavior:
 ```bash
 # Watch session files

@@ -41,7 +41,8 @@ case "$hook_event_name" in
     echo "{\"ts\":$timestamp,\"sid\":\"$session_id\",\"type\":\"stop\"}" >> "$EVENTS_FILE"
     ;;
   SessionStart)
-    echo "{\"ts\":$timestamp,\"sid\":\"$session_id\",\"type\":\"session_start\",\"cwd\":\"$cwd\"}" >> "$EVENTS_FILE"
+    transcript_path=$(echo "$input" | "$JQ" -r '.transcript_path // ""')
+    echo "{\"ts\":$timestamp,\"sid\":\"$session_id\",\"type\":\"session_start\",\"cwd\":\"$cwd\",\"transcript_path\":\"$transcript_path\"}" >> "$EVENTS_FILE"
     ;;
   SessionEnd)
     echo "{\"ts\":$timestamp,\"sid\":\"$session_id\",\"type\":\"session_end\"}" >> "$EVENTS_FILE"

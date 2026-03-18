@@ -18,7 +18,7 @@ input=$(cat)
 
 hook_event_name=$(echo "$input" | "$JQ" -r '.hook_event_name // "unknown"')
 session_id=$(echo "$input" | "$JQ" -r '.session_id // "unknown"')
-cwd=$(echo "$input" | "$JQ" -r '.cwd // ""')
+transcript_path=$(echo "$input" | "$JQ" -r '.transcript_path // ""')
 
 if command -v perl >/dev/null 2>&1; then
   timestamp=$(perl -MTime::HiRes=time -e 'printf "%.0f", time * 1000')
@@ -31,21 +31,20 @@ fi
 case "$hook_event_name" in
   PreToolUse)
     tool_name=$(echo "$input" | "$JQ" -r '.tool_name // "unknown"')
-    echo "{\"ts\":$timestamp,\"sid\":\"$session_id\",\"type\":\"tool_start\",\"tool\":\"$tool_name\",\"cwd\":\"$cwd\"}" >> "$EVENTS_FILE"
+    echo "{\"ts\":$timestamp,\"sid\":\"$session_id\",\"type\":\"tool_start\",\"tool\":\"$tool_name\",\"transcript_path\":\"$transcript_path\"}" >> "$EVENTS_FILE"
     ;;
   PostToolUse)
     tool_name=$(echo "$input" | "$JQ" -r '.tool_name // "unknown"')
-    echo "{\"ts\":$timestamp,\"sid\":\"$session_id\",\"type\":\"tool_end\",\"tool\":\"$tool_name\"}" >> "$EVENTS_FILE"
+    echo "{\"ts\":$timestamp,\"sid\":\"$session_id\",\"type\":\"tool_end\",\"tool\":\"$tool_name\",\"transcript_path\":\"$transcript_path\"}" >> "$EVENTS_FILE"
     ;;
   Stop)
-    echo "{\"ts\":$timestamp,\"sid\":\"$session_id\",\"type\":\"stop\"}" >> "$EVENTS_FILE"
+    echo "{\"ts\":$timestamp,\"sid\":\"$session_id\",\"type\":\"stop\",\"transcript_path\":\"$transcript_path\"}" >> "$EVENTS_FILE"
     ;;
   SessionStart)
-    transcript_path=$(echo "$input" | "$JQ" -r '.transcript_path // ""')
-    echo "{\"ts\":$timestamp,\"sid\":\"$session_id\",\"type\":\"session_start\",\"cwd\":\"$cwd\",\"transcript_path\":\"$transcript_path\"}" >> "$EVENTS_FILE"
+    echo "{\"ts\":$timestamp,\"sid\":\"$session_id\",\"type\":\"session_start\",\"transcript_path\":\"$transcript_path\"}" >> "$EVENTS_FILE"
     ;;
   SessionEnd)
-    echo "{\"ts\":$timestamp,\"sid\":\"$session_id\",\"type\":\"session_end\"}" >> "$EVENTS_FILE"
+    echo "{\"ts\":$timestamp,\"sid\":\"$session_id\",\"type\":\"session_end\",\"transcript_path\":\"$transcript_path\"}" >> "$EVENTS_FILE"
     ;;
 esac
 

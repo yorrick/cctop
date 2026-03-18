@@ -3,7 +3,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cctop.models import Event, Session
-from cctop.sources.index import _read_transcript_metadata, find_index_entry
+from cctop.sources.index import (
+    _read_transcript_metadata,
+    encode_cwd,
+    find_index_entry,
+)
 from cctop.sources.sessions import discover_sessions
 
 # Grace period before a session transitions from "working" to "idle".
@@ -31,9 +35,6 @@ class SessionManager:
         self._hook_sid_to_pid_sid: dict[str, str] = {}
         # Reverse mapping: PID-file session ID -> hook/transcript session ID
         self._pid_sid_to_hook_sid: dict[str, str] = {}
-        # Maps cwd -> PID-file session ID for reverse lookup.
-        # None means the CWD is shared by multiple alive sessions (ambiguous).
-        self._cwd_to_pid_sid: dict[str, str | None] = {}
         # Sessions that received a Stop event (Claude finished its turn).
         # Only these are candidates for idle transition after grace period.
         # Sessions with only tool_end events stay "working" (Claude is still thinking).
@@ -42,6 +43,10 @@ class SessionManager:
         # one extra refresh cycle before marking offline to avoid flicker
         # caused by transient file-read failures.
         self._missing_pids: dict[str, datetime] = {}
+        # PID-file session ID -> transcript path (learned from events).
+        # Used to retry enrichment on subsequent refresh() cycles when
+        # the transcript wasn't ready during session_start processing.
+        self._transcript_paths: dict[str, Path] = {}
 
     @property
     def projects_dir(self) -> Path:
@@ -57,9 +62,6 @@ class SessionManager:
         raw_sessions = discover_sessions(self._sessions_dir)
         now = datetime.now(tz=timezone.utc)
 
-        # Rebuild CWD map fresh each cycle so it correctly reflects which
-        # CWDs are ambiguous (shared by multiple alive sessions).
-        self._cwd_to_pid_sid.clear()
         seen_ids: set[str] = set()
         for raw in raw_sessions:
             seen_ids.add(raw.session_id)
@@ -114,6 +116,12 @@ class SessionManager:
                 hook_sid = self._pid_sid_to_hook_sid.get(raw.session_id)
                 if hook_sid:
                     entry = find_index_entry(self._projects_dir, raw.cwd, hook_sid)
+            if not entry:
+                # Try 2: use transcript_path learned from events (handles the
+                # race where session_start fires before the transcript is written)
+                tp = self._transcript_paths.get(raw.session_id)
+                if tp and tp.is_file():
+                    entry = _read_transcript_metadata(tp.stem, tp)
             if entry:
                 session.summary = entry.summary
                 session.first_prompt = entry.first_prompt
@@ -127,15 +135,6 @@ class SessionManager:
                 session.git_branch = _detect_git_branch(raw.cwd)
 
             self._sessions[raw.session_id] = session
-            # Only alive sessions participate in CWD-based event mapping.
-            if raw.is_alive:
-                cwd_key = str(raw.cwd)
-                if cwd_key in self._cwd_to_pid_sid and self._cwd_to_pid_sid[cwd_key] != raw.session_id:
-                    # Multiple alive sessions share this CWD — CWD-based mapping
-                    # is ambiguous, so disable it by setting to None.
-                    self._cwd_to_pid_sid[cwd_key] = None  # type: ignore[assignment]
-                else:
-                    self._cwd_to_pid_sid[cwd_key] = raw.session_id
 
         # Apply idle grace period: only transition to idle if Claude has finished
         # its turn (Stop event received) AND the grace period has elapsed.
@@ -171,17 +170,16 @@ class SessionManager:
                 # Session reappeared — clear any missing-pid tracking
                 self._missing_pids.pop(sid, None)
 
-    def _resolve_session(self, event: Event, allow_cwd_mapping: bool = True) -> Session | None:
+    def _resolve_session(self, event: Event) -> Session | None:
         """Resolve a hook event to a Session, handling the session ID mismatch.
 
         When Claude resumes a session, the PID file gets a new session ID, but hooks
         still report the original transcript session ID. We resolve this by:
-        1. Direct lookup (hook sid == pid-file sid, for sessions started after install)
+        1. Direct lookup (hook sid == pid-file sid, for new sessions)
         2. Cached mapping (we've seen this hook sid before and mapped it)
-        3. CWD-based mapping (hook event cwd matches an active session's cwd)
-           Only used for tool_start/tool_end/stop — not session_start/session_end,
-           which can fire from transient subprocesses (e.g. `claude --print` spawned
-           by generate_summary) that share the same cwd but are not the real session.
+        3. Transcript-path matching: extract the encoded project dir from the
+           event's transcript_path and find a session whose CWD encodes to the
+           same directory. This is deterministic — no ambiguity.
         """
         # Direct match
         session = self._sessions.get(event.sid)
@@ -193,38 +191,51 @@ class SessionManager:
         if pid_sid:
             return self._sessions.get(pid_sid)
 
-        # CWD-based mapping: match hook event's cwd to a known session
-        if allow_cwd_mapping and event.cwd:
-            pid_sid = self._cwd_to_pid_sid.get(event.cwd)
-            if pid_sid:
-                self._hook_sid_to_pid_sid[event.sid] = pid_sid
-                self._pid_sid_to_hook_sid[pid_sid] = event.sid
-                # Also use the hook sid (transcript sid) for index lookups
-                session = self._sessions.get(pid_sid)
-                if session and (not session.summary or not session.name):
-                    entry = find_index_entry(self._projects_dir, session.cwd, event.sid)
-                    if entry:
-                        session.summary = entry.summary
-                        session.first_prompt = entry.first_prompt
-                        if entry.git_branch:
-                            session.git_branch = entry.git_branch
-                        session.message_count = entry.message_count
-                        if entry.name:
-                            session.name = entry.name
-                return session
+        # Transcript-path matching: use the project dir encoded in the
+        # transcript path to find the owning session deterministically.
+        if event.transcript_path:
+            # transcript_path looks like:
+            #   ~/.claude/projects/-Users-foo-work-myproject/<sid>.jsonl
+            # Extract the project dir name (the parent directory name).
+            tp = Path(event.transcript_path)
+            event_project_dir = tp.parent.name
+
+            for session in self._sessions.values():
+                if encode_cwd(session.cwd) == event_project_dir:
+                    # Reject stale events: if the event predates the session,
+                    # it belongs to a previous (dead) session.
+                    if event.ts < int(session.started_at.timestamp() * 1000):
+                        continue
+                    pid_sid = session.session_id
+                    self._hook_sid_to_pid_sid[event.sid] = pid_sid
+                    self._pid_sid_to_hook_sid[pid_sid] = event.sid
+                    # Enrich with index data using the transcript session ID
+                    if not session.summary or not session.name:
+                        entry = find_index_entry(self._projects_dir, session.cwd, event.sid)
+                        if entry:
+                            session.summary = entry.summary
+                            session.first_prompt = entry.first_prompt
+                            if entry.git_branch:
+                                session.git_branch = entry.git_branch
+                            session.message_count = entry.message_count
+                            if entry.name:
+                                session.name = entry.name
+                    return session
 
         return None
 
     def apply_events(self, events: list[Event]) -> None:
         """Apply hook events to update session status."""
         for event in events:
-            # session_start/session_end can fire from transient subprocesses (e.g.
-            # `claude --print` spawned by generate_summary). Only allow CWD-based
-            # resolution for events that indicate real Claude Code work activity.
-            allow_cwd = event.type in ("tool_start", "tool_end", "stop")
-            session = self._resolve_session(event, allow_cwd_mapping=allow_cwd)
+            session = self._resolve_session(event)
             if session is None:
                 continue
+
+            # Remember transcript_path so refresh() can retry enrichment
+            # on subsequent cycles (handles the race where session_start
+            # fires before the transcript file is fully written).
+            if event.transcript_path:
+                self._transcript_paths[session.session_id] = Path(event.transcript_path)
 
             now_ts = datetime.fromtimestamp(event.ts / 1000, tz=timezone.utc)
 

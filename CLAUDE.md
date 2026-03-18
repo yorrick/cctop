@@ -38,9 +38,27 @@ Any assumption about how `claude` CLI behaves (what files it creates, what hooks
 Validated facts (do not re-investigate unless behavior seems to have changed):
 - `claude --print "..."` does NOT create a PID file in `~/.claude/sessions/`
 - `claude --print "..."` DOES fire hook events: `session_start`, `stop`, `session_end` (with a new session ID and the cwd of the process that spawned it)
-- These events can be mistakenly resolved to a real session via CWD-based mapping if not guarded
 
 **NEVER use recency-based (most recently modified file) fallbacks** for transcript/session ID resolution. When multiple sessions share a project directory, the most recently modified transcript belongs to a *different* session, causing cross-contamination (e.g. session "features" getting the name "backlog"). Only use exact session ID matches.
+
+**NEVER use CWD-based heuristics** to map hook events to sessions. CWD mapping is unreliable — multiple sessions can share the same CWD, and stale events from dead sessions get mis-attributed to new ones. Use `transcript_path` (available on every hook event) for deterministic matching.
+
+### Session ID → Transcript Mapping
+
+Claude Code uses two different session IDs that may diverge:
+- **PID-file session ID**: stored in `~/.claude/sessions/{pid}.json`, changes on every resume
+- **Transcript session ID**: the original ID embedded in the transcript `.jsonl` filename, stable across resumes
+
+Hook events report the **transcript** session ID and include `transcript_path`, while cctop discovers sessions via **PID-file** session IDs. The `SessionManager._resolve_session()` bridges this gap via:
+1. Direct match (PID-file ID == transcript ID, for new sessions)
+2. Cached mapping (learned from a previous transcript-path match)
+3. Transcript-path matching: extract the encoded project dir from `event.transcript_path`, find a session whose `encode_cwd(cwd)` matches. Stale events (timestamp before the session's `started_at`) are rejected.
+
+Note: the transcript file may not exist yet when `session_start` fires. The `transcript_path` is stored and retried on subsequent `refresh()` cycles.
+
+### Project Directory Encoding (`encode_cwd`)
+
+Claude Code encodes CWD paths into project directory names by replacing `/`, `_`, and `.` with `-`. Our `encode_cwd()` must match this exactly. Example: `/Users/foo/.worktrees/bar` → `-Users-foo--worktrees-bar` (the `.` becomes `-`, creating a double dash).
 
 To validate new assumptions about `claude` CLI behavior:
 ```bash

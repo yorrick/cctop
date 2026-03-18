@@ -1,6 +1,6 @@
 [project]
 name = "claude-cctop"
-version = "0.2.1"
+version = "0.2.2"
 description = "A htop-like TUI for monitoring Claude Code sessions in real-time"
 readme = "README.md"
 license = "MIT"

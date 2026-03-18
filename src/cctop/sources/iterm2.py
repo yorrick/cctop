@@ -62,19 +62,23 @@ class ITermBridge:
         try:
             app = await getattr(_iterm2, "async_get_app")(self._connection)
 
-            # Build root-PID -> iTerm2 session map
-            pid_map: dict[int, object] = {}
+            # Build root-PID -> (window, tab, session) map
+            pid_map: dict[int, tuple[object, object, object]] = {}
             for window in app.windows:
                 for tab in window.tabs:
                     for session in tab.sessions:
                         root_pid = await session.async_get_variable("pid")
-                        pid_map[root_pid] = session
+                        pid_map[root_pid] = (window, tab, session)
 
             # Walk up from Claude PID to find a match
             p = getattr(_psutil, "Process")(claude_pid)
             while p.pid > 1:
                 if p.pid in pid_map:
-                    await getattr(pid_map[p.pid], "async_activate")()
+                    window, tab, session = pid_map[p.pid]
+                    # Activate window first (un-minimizes if needed), then tab, then pane
+                    await getattr(window, "async_activate")()
+                    await getattr(tab, "async_select")()
+                    await getattr(session, "async_activate")()
                     logger.debug("Focused iTerm2 session for PID {}", claude_pid)
                     return True
                 parent = p.parent()

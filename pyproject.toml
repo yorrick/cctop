@@ -32,6 +32,9 @@ Homepage = "https://github.com/yorrick/cctop"
 Repository = "https://github.com/yorrick/cctop"
 Issues = "https://github.com/yorrick/cctop/issues"
 
+[project.optional-dependencies]
+iterm2 = ["iterm2", "psutil>=5.0"]
+
 [project.scripts]
 cctop = "cctop.cli:app"
 

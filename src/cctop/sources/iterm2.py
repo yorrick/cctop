@@ -66,7 +66,7 @@ class ITermBridge:
             pid_map: dict[int, tuple[object, object, object]] = {}
             for window in app.windows:
                 for tab in window.tabs:
-                    for session in tab.sessions:
+                    for session in tab.all_sessions:
                         root_pid = await session.async_get_variable("pid")
                         pid_map[root_pid] = (window, tab, session)
 

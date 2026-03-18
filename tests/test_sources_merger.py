@@ -6,9 +6,14 @@ from pathlib import Path
 from cctop.models import Event
 from cctop.sources.merger import SessionManager
 
+# Default startedAt for test sessions — use _SESSION_STARTED_AT + offset for event timestamps
+_SESSION_STARTED_AT = 1773764468081
 
-def _write_session_file(sessions_dir: Path, pid: int, session_id: str, cwd: str) -> None:
-    data = {"pid": pid, "sessionId": session_id, "cwd": cwd, "startedAt": 1773764468081}
+
+def _write_session_file(
+    sessions_dir: Path, pid: int, session_id: str, cwd: str, started_at: int = _SESSION_STARTED_AT
+) -> None:
+    data = {"pid": pid, "sessionId": session_id, "cwd": cwd, "startedAt": started_at}
     (sessions_dir / f"{pid}.json").write_text(json.dumps(data))
 
 
@@ -64,7 +69,7 @@ def test_merge_applies_tool_events(tmp_path: Path) -> None:
 
     mgr.apply_events(
         [
-            Event(ts=1000, sid="abc-123", type="tool_start", tool="Bash", cwd="/tmp/test"),
+            Event(ts=1000, sid="abc-123", type="tool_start", tool="Bash"),
         ]
     )
 
@@ -267,3 +272,236 @@ def test_pr_data_survives_refresh(tmp_path: Path) -> None:
 
     assert mgr.sessions[0].pr_url == "https://github.com/org/repo/pull/42"
     assert mgr.sessions[0].pr_title == "feat: cool feature"
+
+
+def test_transcript_path_mapping_resolves_resumed_session(tmp_path: Path) -> None:
+    """Events with a different SID resolve via transcript_path matching."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    _write_session_file(sessions_dir, os.getpid(), "pid-sid-A", "/tmp/unique")
+
+    # Create the project dir that encode_cwd("/tmp/unique") produces
+    project_dir = projects_dir / "-tmp-unique"
+    project_dir.mkdir()
+
+    mgr = SessionManager(sessions_dir=sessions_dir, projects_dir=projects_dir)
+    mgr.refresh()
+
+    # Event from a resumed session: different SID, but transcript_path
+    # points to the same project directory as the session's CWD.
+    transcript_path = str(project_dir / "hook-sid.jsonl")
+    mgr.apply_events(
+        [
+            Event(
+                ts=_SESSION_STARTED_AT + 1000,
+                sid="hook-sid",
+                type="tool_start",
+                tool="Read",
+                transcript_path=transcript_path,
+            )
+        ]
+    )
+
+    session = mgr.sessions[0]
+    assert session.status == "working"
+    assert session.current_tool == "Read"
+
+
+def test_transcript_path_mapping_rejects_stale_events(tmp_path: Path) -> None:
+    """Events older than the session's startedAt must not be mapped to it."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    _write_session_file(sessions_dir, os.getpid(), "new-session", "/tmp/test")
+
+    project_dir = projects_dir / "-tmp-test"
+    project_dir.mkdir()
+
+    mgr = SessionManager(sessions_dir=sessions_dir, projects_dir=projects_dir)
+    mgr.refresh()
+
+    # Stale event from an old session — timestamp before the current session started
+    transcript_path = str(project_dir / "old-hook-sid.jsonl")
+    mgr.apply_events(
+        [
+            Event(
+                ts=_SESSION_STARTED_AT - 1000,
+                sid="old-hook-sid",
+                type="tool_start",
+                tool="Bash",
+                transcript_path=transcript_path,
+            )
+        ]
+    )
+
+    # Session should NOT have been affected
+    session = mgr.sessions[0]
+    assert session.status == "idle"
+    assert session.current_tool is None
+
+
+def test_events_without_transcript_path_only_resolve_by_sid(tmp_path: Path) -> None:
+    """Events without transcript_path can only resolve via direct SID or cached mapping."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    _write_session_file(sessions_dir, os.getpid(), "session-A", "/tmp/test")
+
+    mgr = SessionManager(sessions_dir=sessions_dir, projects_dir=projects_dir)
+    mgr.refresh()
+
+    # Event with unknown SID and no transcript_path — should NOT resolve
+    mgr.apply_events([Event(ts=_SESSION_STARTED_AT + 1000, sid="unknown-sid", type="tool_start", tool="Bash")])
+
+    session = mgr.sessions[0]
+    assert session.status == "idle"
+    assert session.current_tool is None
+
+
+def test_session_start_with_transcript_path_enriches_name(tmp_path: Path) -> None:
+    """session_start event with transcript_path reads name from transcript."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    _write_session_file(sessions_dir, os.getpid(), "pid-sid", "/tmp/test")
+
+    # Create a transcript at an arbitrary path with a custom-title
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "custom-title", "customTitle": "my-feature", "sessionId": "pid-sid"})
+        + "\n"
+        + json.dumps({"type": "user", "message": {"content": "hello"}})
+        + "\n"
+    )
+
+    mgr = SessionManager(sessions_dir=sessions_dir, projects_dir=projects_dir)
+    mgr.refresh()
+
+    assert mgr.sessions[0].name is None  # No transcript match by session ID
+
+    # session_start event carries transcript_path — should enrich name
+    mgr.apply_events(
+        [
+            Event(
+                ts=1000,
+                sid="pid-sid",
+                type="session_start",
+                cwd="/tmp/test",
+                transcript_path=str(transcript),
+            ),
+        ]
+    )
+
+    assert mgr.sessions[0].name == "my-feature"
+
+
+def test_session_start_without_transcript_path_no_crash(tmp_path: Path) -> None:
+    """session_start without transcript_path still works normally."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    _write_session_file(sessions_dir, os.getpid(), "abc-123", "/tmp/test")
+
+    mgr = SessionManager(sessions_dir=sessions_dir, projects_dir=projects_dir)
+    mgr.refresh()
+
+    mgr.apply_events(
+        [
+            Event(ts=1000, sid="abc-123", type="session_start", cwd="/tmp/test"),
+        ]
+    )
+
+    assert mgr.sessions[0].name is None
+
+
+def test_cached_mapping_persists_after_transcript_path_match(tmp_path: Path) -> None:
+    """Once transcript_path establishes a mapping, subsequent events use the cache."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    _write_session_file(sessions_dir, os.getpid(), "pid-sid", "/tmp/myproject")
+
+    project_dir = projects_dir / "-tmp-myproject"
+    project_dir.mkdir()
+
+    mgr = SessionManager(sessions_dir=sessions_dir, projects_dir=projects_dir)
+    mgr.refresh()
+
+    transcript_path = str(project_dir / "hook-sid.jsonl")
+
+    # First event establishes the mapping via transcript_path
+    mgr.apply_events(
+        [
+            Event(
+                ts=_SESSION_STARTED_AT + 1000,
+                sid="hook-sid",
+                type="tool_start",
+                tool="Bash",
+                transcript_path=transcript_path,
+            )
+        ]
+    )
+    assert mgr.sessions[0].status == "working"
+
+    # Second event from same hook SID — resolves via cached mapping,
+    # even without transcript_path
+    mgr.apply_events(
+        [
+            Event(
+                ts=_SESSION_STARTED_AT + 2000,
+                sid="hook-sid",
+                type="stop",
+            )
+        ]
+    )
+    assert mgr.sessions[0].session_id in mgr._stopped_sessions  # noqa: SLF001
+
+
+def test_refresh_retries_transcript_enrichment(tmp_path: Path) -> None:
+    """If transcript wasn't ready during session_start, refresh() retries."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    _write_session_file(sessions_dir, os.getpid(), "pid-sid", "/tmp/test")
+
+    project_dir = projects_dir / "-tmp-test"
+    project_dir.mkdir()
+    transcript = project_dir / "pid-sid.jsonl"
+
+    mgr = SessionManager(sessions_dir=sessions_dir, projects_dir=projects_dir)
+    mgr.refresh()
+
+    # session_start fires but transcript doesn't exist yet
+    mgr.apply_events(
+        [
+            Event(
+                ts=_SESSION_STARTED_AT + 100,
+                sid="pid-sid",
+                type="session_start",
+                transcript_path=str(transcript),
+            ),
+        ]
+    )
+    assert mgr.sessions[0].name is None
+
+    # Now the transcript appears (simulating Claude Code writing it)
+    transcript.write_text(json.dumps({"type": "custom-title", "customTitle": "backlog", "sessionId": "pid-sid"}) + "\n")
+
+    # Next refresh() should pick up the name via the stored transcript_path
+    mgr.refresh()
+    assert mgr.sessions[0].name == "backlog"

@@ -34,6 +34,7 @@ class SessionDetail(Static):
             lines.append(f"  │  Prompt: {prompt}\n", style="dim")
 
         lines.append(f"  │  Dir: {s.cwd}\n", style="dim")
+        lines.append(f"  │  Session: {s.session_id}\n", style="dim")
 
         if s.git_branch:
             lines.append(f"  │  Branch: {s.git_branch}", style="cyan")

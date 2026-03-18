@@ -14,6 +14,7 @@ class Event(BaseModel):
     tool: str | None = None
     ok: bool | None = None
     cwd: str | None = None
+    transcript_path: str | None = None
 
 
 class Session(BaseModel):

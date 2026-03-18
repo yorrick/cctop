@@ -137,6 +137,7 @@ class CctopApp(App):
             "↑/↓ or k/j   Navigate sessions\n"
             "Space         Expand / collapse\n"
             "Enter         Focus iTerm2 pane\n"
+            "c             Copy session ID\n"
             "F6 or >/<     Cycle sort mode\n"
             "/             Filter (coming soon)\n"
             "?/h           This help\n"

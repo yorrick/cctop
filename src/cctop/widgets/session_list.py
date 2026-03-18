@@ -24,6 +24,7 @@ class SessionList(VerticalScroll):
         Binding("space", "toggle_expand", "Expand/Collapse"),
         Binding("enter", "focus_iterm", "Focus pane"),
         Binding("r", "regenerate_summary", "Regenerate summary"),
+        Binding("c", "copy_session_id", "Copy session ID"),
     ]
 
     def __init__(self, projects_dir: Path | None = None, **kwargs) -> None:
@@ -98,6 +99,14 @@ class SessionList(VerticalScroll):
             return
         self._llm_summaries.pop(sid, None)
         self._start_summary_generation(session)
+
+    def action_copy_session_id(self) -> None:
+        """Copy the focused session's ID to the clipboard."""
+        if not self._sessions:
+            return
+        session = self._sessions[self._cursor]
+        self.app.copy_to_clipboard(session.session_id)
+        self.app.notify(f"Copied: {session.session_id}", timeout=2)
 
     def _start_summary_generation(self, session: Session) -> None:
         """Set the generating sentinel, rebuild, then fire the worker."""

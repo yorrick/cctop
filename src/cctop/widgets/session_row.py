@@ -55,8 +55,11 @@ class SessionRow(Static):
             branch_display = branch_display[: max_branch_len - 1] + "…"
         line.append(f"{branch_display:<{max_branch_len}}", style="cyan")
 
-        if s.status == "working" and s.current_tool:
-            line.append(f"Working: {s.current_tool:<10}", style="green")
+        if s.status == "working":
+            if s.current_tool:
+                line.append(f"Working: {s.current_tool:<10}", style="green")
+            else:
+                line.append(f"{'Working':<20}", style="green")
         elif s.status == "idle":
             line.append(f"{'Idle':<20}", style="yellow")
         else:

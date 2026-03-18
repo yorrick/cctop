@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "claude-code-guide": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "claude-code-ultimate-guide-mcp"]
+    }
+  }
+}

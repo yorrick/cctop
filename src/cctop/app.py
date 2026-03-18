@@ -7,6 +7,7 @@ from textual.css.query import NoMatches
 
 from cctop.models import Session
 from cctop.sources.events import EventsTailer
+from cctop.sources.iterm2 import ITermBridge
 from cctop.sources.merger import SessionManager
 from cctop.widgets.footer import Footer
 from cctop.widgets.header import Header
@@ -60,6 +61,7 @@ class CctopApp(App):
         self._manager = SessionManager(recent=recent)
         self._tailer = EventsTailer(Path.home() / ".cctop" / "data" / "events.jsonl")
         self._sort_index = 0
+        self._iterm_bridge = ITermBridge()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -67,6 +69,7 @@ class CctopApp(App):
         yield Footer()
 
     async def on_mount(self) -> None:
+        await self._iterm_bridge.connect()
         self._tailer.cleanup_if_needed()
         if not self._tailer.hooks_installed:
             self.notify(
@@ -132,7 +135,8 @@ class CctopApp(App):
         help_text = (
             "cctop — Claude Code session monitor\n\n"
             "↑/↓ or k/j   Navigate sessions\n"
-            "Enter         Expand / collapse\n"
+            "Space         Expand / collapse\n"
+            "Enter         Focus iTerm2 pane\n"
             "F6 or >/<     Cycle sort mode\n"
             "/             Filter (coming soon)\n"
             "?/h           This help\n"

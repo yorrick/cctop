@@ -42,6 +42,11 @@ class SessionRow(Static):
 
         line = Text()
         line.append(f" {icon} ", style=color)
+        name_display = s.name or "—"
+        max_name_len = 16
+        if len(name_display) > max_name_len:
+            name_display = name_display[: max_name_len - 1] + "…"
+        line.append(f"{name_display:<{max_name_len}}", style=None if s.name else "dim")
         line.append(f"{s.project_name:<24}", style="bold")
 
         branch_display = s.worktree_name or s.git_branch or "—"

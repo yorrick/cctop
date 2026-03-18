@@ -34,6 +34,7 @@ class Session(BaseModel):
     ended_at: datetime | None = None
     message_count: int = 0
     summary: str | None = None
+    name: str | None = None
     first_prompt: str | None = None
 
     @model_validator(mode="after")

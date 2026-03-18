@@ -77,6 +77,7 @@ class SessionManager:
                     last_activity=last_activity,
                     pr_url=existing.pr_url if existing else None,
                     pr_title=existing.pr_title if existing else None,
+                    name=existing.name if existing else None,
                 )
             else:
                 ended_at = existing.ended_at if existing else now
@@ -93,6 +94,7 @@ class SessionManager:
                     ended_at=ended_at,
                     pr_url=existing.pr_url if existing else None,
                     pr_title=existing.pr_title if existing else None,
+                    name=existing.name if existing else None,
                 )
 
             if session.status == "offline" and self._recent == timedelta(0):
@@ -123,6 +125,8 @@ class SessionManager:
                 session.first_prompt = entry.first_prompt
                 session.git_branch = entry.git_branch
                 session.message_count = entry.message_count
+                if entry.name:
+                    session.name = entry.name
 
             # If no git branch from index, detect from the working directory
             if not session.git_branch:
@@ -195,7 +199,7 @@ class SessionManager:
                 self._pid_sid_to_hook_sid[pid_sid] = event.sid
                 # Also use the hook sid (transcript sid) for index lookups
                 session = self._sessions.get(pid_sid)
-                if session and not session.summary:
+                if session and (not session.summary or not session.name):
                     entry = find_index_entry(self._projects_dir, session.cwd, event.sid)
                     if entry:
                         session.summary = entry.summary
@@ -203,6 +207,8 @@ class SessionManager:
                         if entry.git_branch:
                             session.git_branch = entry.git_branch
                         session.message_count = entry.message_count
+                        if entry.name:
+                            session.name = entry.name
                 return session
 
         return None

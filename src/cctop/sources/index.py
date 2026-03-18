@@ -15,6 +15,7 @@ class IndexEntry(BaseModel):
     first_prompt: str | None = Field(default=None, alias="firstPrompt")
     git_branch: str | None = Field(default=None, alias="gitBranch")
     message_count: int = Field(default=0, alias="messageCount")
+    name: str | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -103,6 +104,7 @@ def _read_transcript_metadata(session_id: str, transcript_path: Path) -> IndexEn
     message_count = 0
     git_branch: str | None = None
     summary: str | None = None
+    name: str | None = None
 
     try:
         with transcript_path.open() as f:
@@ -114,7 +116,10 @@ def _read_transcript_metadata(session_id: str, transcript_path: Path) -> IndexEn
 
                 msg_type = data.get("type")
 
-                if msg_type == "user":
+                if msg_type == "custom-title":
+                    name = data.get("customTitle")
+
+                elif msg_type == "user":
                     message_count += 1
                     if first_prompt is None:
                         text = _extract_user_text(data)
@@ -132,7 +137,7 @@ def _read_transcript_metadata(session_id: str, transcript_path: Path) -> IndexEn
         logger.warning("Failed to read transcript {}: {}", transcript_path, e)
         return None
 
-    if first_prompt is None and message_count == 0:
+    if first_prompt is None and message_count == 0 and name is None:
         return None
 
     # Use first prompt as summary if no real summary exists
@@ -146,6 +151,7 @@ def _read_transcript_metadata(session_id: str, transcript_path: Path) -> IndexEn
             "firstPrompt": first_prompt,
             "gitBranch": git_branch,
             "messageCount": message_count,
+            "name": name,
         }
     )
 

@@ -4,7 +4,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from cctop.sources.index import encode_cwd, find_index_entry, find_transcript_path
+from cctop.sources.index import (
+    _read_transcript_metadata,
+    encode_cwd,
+    find_index_entry,
+    find_transcript_path,
+)
 
 
 def test_encode_cwd() -> None:
@@ -103,3 +108,38 @@ def test_find_transcript_path_no_match(tmp_path: Path) -> None:
 
     result = find_transcript_path(projects_dir, cwd, "nonexistent", started_at)
     assert result is None
+
+
+def test_read_transcript_extracts_custom_title(tmp_path: Path) -> None:
+    """customTitle in first line is extracted into IndexEntry.name."""
+    transcript = tmp_path / "abc-123.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "custom-title", "customTitle": "my-feature", "sessionId": "abc-123"})
+        + "\n"
+        + json.dumps({"type": "user", "message": {"content": "hello"}})
+        + "\n"
+    )
+    entry = _read_transcript_metadata("abc-123", transcript)
+    assert entry is not None
+    assert entry.name == "my-feature"
+
+
+def test_read_transcript_name_set_even_with_no_messages(tmp_path: Path) -> None:
+    """Returns IndexEntry with name even when message_count == 0."""
+    transcript = tmp_path / "abc-123.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "custom-title", "customTitle": "early-session", "sessionId": "abc-123"}) + "\n"
+    )
+    entry = _read_transcript_metadata("abc-123", transcript)
+    assert entry is not None
+    assert entry.name == "early-session"
+    assert entry.message_count == 0
+
+
+def test_read_transcript_name_none_when_no_custom_title(tmp_path: Path) -> None:
+    """Returns IndexEntry with name=None when transcript has no custom-title."""
+    transcript = tmp_path / "abc-123.jsonl"
+    transcript.write_text(json.dumps({"type": "user", "message": {"content": "hello"}}) + "\n")
+    entry = _read_transcript_metadata("abc-123", transcript)
+    assert entry is not None
+    assert entry.name is None

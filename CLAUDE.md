@@ -71,6 +71,11 @@ tail -f ~/.cctop/data/events.jsonl | python3 -c "import sys,json; [print(json.lo
 # Run the thing you want to test, then inspect what changed
 ```
 
+## iTerm2 Integration — Validated Behavior
+
+- `tab.sessions` **excludes** panes that are hidden when another pane in the same tab is maximized (iTerm2 calls these "minimized sessions"). Always use `tab.all_sessions` to enumerate all panes.
+- `window.async_activate()` brings a window to front but does **not** un-minimize a macOS-minimized window. It returns successfully but has no visible effect on minimized windows.
+
 ## Versioning
 
 This project uses **semantic versioning** (semver). The version is in `pyproject.toml`.
@@ -80,6 +85,14 @@ This project uses **semantic versioning** (semver). The version is in `pyproject
 - **Major** (x.0.0): breaking changes
 
 **Always bump the version** when making changes that will be published to PyPI. Do not forget this step — an unchanged version means `uvx` users get a stale release.
+
+### Publishing to PyPI
+
+```bash
+uv build && uv publish --token $PYPI_API_TOKEN
+```
+
+The `PYPI_API_TOKEN` env var must be set (from dotenv or shell). Clean the `dist/` directory first if you want to avoid re-uploading old versions.
 
 ## Issue Tracking
 

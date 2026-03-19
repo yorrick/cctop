@@ -50,7 +50,7 @@ async def test_connect_api_server_disabled() -> None:
 
 @pytest.mark.asyncio
 async def test_activate_session_success() -> None:
-    """PID walk-up finds matching iTerm2 session and activates it."""
+    """PID walk-up finds matching iTerm2 session and activates window, tab, and pane."""
     mock_iterm_session = AsyncMock()
     mock_iterm_session.session_id = "iterm-session-1"
 
@@ -69,9 +69,9 @@ async def test_activate_session_success() -> None:
 
     # Mock iTerm2 app with one session whose root PID is 10
     mock_app = AsyncMock()
-    mock_tab = MagicMock()
-    mock_tab.sessions = [mock_iterm_session]
-    mock_window = MagicMock()
+    mock_tab = AsyncMock()
+    mock_tab.all_sessions = [mock_iterm_session]
+    mock_window = AsyncMock()
     mock_window.tabs = [mock_tab]
     mock_app.windows = [mock_window]
     mock_iterm_session.async_get_variable = AsyncMock(return_value=10)
@@ -92,7 +92,117 @@ async def test_activate_session_success() -> None:
         result = await bridge.activate_session(100)
 
     assert result is True
+    mock_window.async_activate.assert_awaited_once()
+    mock_tab.async_select.assert_awaited_once()
     mock_iterm_session.async_activate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_activate_session_activates_window_tab_and_pane_in_order() -> None:
+    """Activation calls happen in order: window, tab, session."""
+    call_order: list[str] = []
+
+    mock_iterm_session = AsyncMock()
+
+    async def record_session_activate() -> None:
+        call_order.append("session")
+
+    mock_iterm_session.async_activate = AsyncMock(side_effect=record_session_activate)
+    mock_iterm_session.async_get_variable = AsyncMock(return_value=50)
+
+    mock_tab = AsyncMock()
+
+    async def record_tab_select() -> None:
+        call_order.append("tab")
+
+    mock_tab.async_select = AsyncMock(side_effect=record_tab_select)
+    mock_tab.all_sessions = [mock_iterm_session]
+
+    mock_window = AsyncMock()
+
+    async def record_window_activate() -> None:
+        call_order.append("window")
+
+    mock_window.async_activate = AsyncMock(side_effect=record_window_activate)
+    mock_window.tabs = [mock_tab]
+
+    mock_app = AsyncMock()
+    mock_app.windows = [mock_window]
+
+    # Direct match: claude PID == root PID
+    mock_process = MagicMock()
+    mock_process.pid = 50
+
+    bridge = ITermBridge()
+    bridge._available = True
+    bridge._connection = MagicMock()
+
+    mock_iterm2_mod = MagicMock()
+    mock_iterm2_mod.async_get_app = AsyncMock(return_value=mock_app)
+    mock_psutil_mod = MagicMock()
+    mock_psutil_mod.Process.return_value = mock_process
+
+    with (
+        patch("cctop.sources.iterm2._iterm2", mock_iterm2_mod),
+        patch("cctop.sources.iterm2._psutil", mock_psutil_mod),
+    ):
+        result = await bridge.activate_session(50)
+
+    assert result is True
+    assert call_order == ["window", "tab", "session"]
+
+
+@pytest.mark.asyncio
+async def test_activate_session_finds_minimized_pane() -> None:
+    """PID walk-up finds a session that is minimized within its tab (maximized pane)."""
+    mock_visible_session = AsyncMock()
+    mock_visible_session.async_get_variable = AsyncMock(return_value=10)
+
+    mock_minimized_session = AsyncMock()
+    mock_minimized_session.async_get_variable = AsyncMock(return_value=20)
+
+    # all_sessions includes both visible and minimized; the Claude process is under the minimized one
+    mock_tab = AsyncMock()
+    mock_tab.all_sessions = [mock_visible_session, mock_minimized_session]
+    mock_window = AsyncMock()
+    mock_window.tabs = [mock_tab]
+
+    mock_app = AsyncMock()
+    mock_app.windows = [mock_window]
+
+    # claude(200) -> fish(30) -> login(20) — login PID matches minimized session root PID
+    mock_login = MagicMock()
+    mock_login.pid = 20
+    mock_login.parent.return_value = None
+
+    mock_fish = MagicMock()
+    mock_fish.pid = 30
+    mock_fish.parent.return_value = mock_login
+
+    mock_claude = MagicMock()
+    mock_claude.pid = 200
+    mock_claude.parent.return_value = mock_fish
+
+    bridge = ITermBridge()
+    bridge._available = True
+    bridge._connection = MagicMock()
+
+    mock_iterm2_mod = MagicMock()
+    mock_iterm2_mod.async_get_app = AsyncMock(return_value=mock_app)
+    mock_psutil_mod = MagicMock()
+    mock_psutil_mod.Process.return_value = mock_claude
+
+    with (
+        patch("cctop.sources.iterm2._iterm2", mock_iterm2_mod),
+        patch("cctop.sources.iterm2._psutil", mock_psutil_mod),
+    ):
+        result = await bridge.activate_session(200)
+
+    assert result is True
+    mock_window.async_activate.assert_awaited_once()
+    mock_tab.async_select.assert_awaited_once()
+    mock_minimized_session.async_activate.assert_awaited_once()
+    mock_visible_session.async_activate.assert_not_awaited()
 
 
 @pytest.mark.asyncio
